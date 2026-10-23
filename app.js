@@ -4,6 +4,7 @@ import SEED from "./seed.js";
 
 const DEMO = !FIREBASE_CONFIG.apiKey || FIREBASE_CONFIG.apiKey.startsWith("PASTE");
 const SDK = "10.12.2";
+const APP_VERSION = "5";
 const OWNER = (OWNER_EMAIL || "").toLowerCase();
 
 // ---------------- state ----------------
@@ -171,7 +172,7 @@ function renderHeader() {
   const league = S.matches.filter(m => !m.extra), played = league.filter(done).length;
   document.getElementById("upd").textContent = S.meta ? `${played} of ${league.length} league matches played` : (loaded ? "" : "Loading…");
   document.getElementById("who").innerHTML = me.email
-    ? `<span class="role">${me.role === "admin" ? "Admin" : me.role === "scorer" ? "Scorer" : "Viewer"}</span><span style="opacity:.8">${esc(me.email)}</span><button class="btn" id="signout">Sign out</button>`
+    ? `<span class="role">${me.role === "admin" ? "Admin" : me.role === "scorer" ? "Scorer" : "Viewer"} · v${APP_VERSION}</span><span style="opacity:.8">${esc(me.email)}</span><button class="btn" id="signout">Sign out</button>`
     : `<button class="btn" id="signin">Organiser sign-in</button>`;
   const standalone = matchMedia("(display-mode: standalone)").matches || navigator.standalone === true;
   const ios = /iPhone|iPad|iPod/.test(navigator.userAgent);

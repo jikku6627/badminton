@@ -4,7 +4,7 @@ import SEED from "./seed.js";
 
 const DEMO = !FIREBASE_CONFIG.apiKey || FIREBASE_CONFIG.apiKey.startsWith("PASTE");
 const SDK = "10.12.2";
-const APP_VERSION = "5";
+const APP_VERSION = "6";
 const OWNER = (OWNER_EMAIL || "").toLowerCase();
 
 // ---------------- state ----------------
@@ -186,7 +186,7 @@ function renderHeader() {
 function matchCard(m) {
   const c = m.cat, p = m.pool, d = done(m), w1 = d && m.s1 > m.s2, w2 = d && m.s2 > m.s1;
   const r = (t, s, w, l) => `<div class="row${w ? " w" : ""}${l ? " l" : ""}"><span class="nm">${p}${t} ${esc(tname(c, p, t))}</span><span class="sc">${fin(s) ? s : ""}</span></div>`;
-  const body = `<div class="meta"><span class="tag">${CATN[c]}, Pool ${p}${m.extra ? " · Extra match" : ""}</span><span>Court ${m.court}</span></div>` + r(m.t1, m.s1, w1, w2) + r(m.t2, m.s2, w2, w1) + (m.note ? `<div class="note">${esc(m.note)}</div>` : "");
+  const body = `<div class="meta"><span class="tag">${CATN[c]}, Pool ${p}${m.extra ? " · Extra match" : ""}</span><span>Court ${m.court}</span></div>` + r(m.t1, m.s1, w1, w2) + r(m.t2, m.s2, w2, w1) + (m.note ? `<div class="note">${esc(m.note)}</div>` : "") + (m.toss && isScorer() ? `<div class="note">${esc(m.toss)}</div>` : "");
   return isScorer() ? `<button class="card" style="--c:${COL(c, p)}" data-edit="${m.id}">${body}</button>` : `<div class="card" style="--c:${COL(c, p)}">${body}</div>`;
 }
 function todayDay() { const t = new Date(); const iso = `${t.getFullYear()}-${String(t.getMonth() + 1).padStart(2, "0")}-${String(t.getDate()).padStart(2, "0")}`; const i = S.meta.days.indexOf(iso); return i >= 0 ? i + 1 : (iso === S.meta.koDate ? "ko" : 1); }
@@ -496,21 +496,40 @@ function openAdd(day) {
   dlg.showModal();
 }
 
-// ---------------- scorer ----------------
+// ---------------- scorer (doubles service tracking) ----------------
 let SC = null;
-const scLoad = () => { try { SC = JSON.parse(localStorage.getItem("hbt-scorer") || "null"); } catch (e) { SC = null; } };
+const scLoad = () => { try { SC = JSON.parse(localStorage.getItem("hbt-scorer") || "null"); if (SC && SC.players === undefined) SC = null; } catch (e) { SC = null; } };
 const scSave = () => { try { localStorage.setItem("hbt-scorer", JSON.stringify(SC)); } catch (e) {} };
-function scNew(ref, a, b, mode, lbl) { SC = { ref, a, b, mode, label: lbl, target: mode === "ko" ? 15 : 30, games: [], pts: [0, 0], swapped: false, changedEnds: false, hist: [], server: null, done: false }; scSave(); }
+const splitTeam = n => { const i = String(n).indexOf(" & "); return i > 0 ? [n.slice(0, i), n.slice(i + 3)] : [`${n} player 1`, `${n} player 2`]; };
+function scNew(ref, a, b, mode, lbl) {
+  SC = { ref, a, b, mode, label: lbl, target: mode === "ko" ? 15 : 30, players: [splitTeam(a), splitTeam(b)],
+    stage: "toss", setup: { tw: null, tc: null, lt: null, fs: null, fr: null },
+    games: [], pts: [0, 0], left: 0, right: [0, 0], servTeam: null, changedEnds: false, hist: [], done: false, toss: "" };
+  scSave();
+}
 const scGamesWon = () => { let a = 0, b = 0; for (const g of SC.games) g[0] > g[1] ? a++ : b++; return [a, b]; };
+const tn = i => (i === 0 ? SC.a : SC.b);
+// who serves and who receives right now
+function scServe() {
+  const s = SC.servTeam, o = 1 - s, even = SC.pts[s] % 2 === 0;
+  const sp = even ? SC.right[s] : 1 - SC.right[s];
+  const rp = even ? SC.right[o] : 1 - SC.right[o];
+  return { s, o, sp, rp, court: even ? "right" : "left", server: SC.players[s][sp], receiver: SC.players[o][rp] };
+}
+function scStartGame(servTeam, fs, fr) {
+  SC.servTeam = servTeam; SC.right[servTeam] = fs; SC.right[1 - servTeam] = fr; SC.stage = "play";
+}
 function scPoint(i) {
-  if (SC.done) return;
-  SC.hist.push(JSON.stringify({ pts: SC.pts, games: SC.games, swapped: SC.swapped, changedEnds: SC.changedEnds, server: SC.server, done: SC.done }));
-  SC.pts = [...SC.pts]; SC.pts[i]++; SC.server = i;
-  if (SC.mode === "league" && !SC.changedEnds && Math.max(...SC.pts) === 15) { SC.changedEnds = true; SC.swapped = !SC.swapped; SC.flash = "Change ends"; }
+  if (SC.done || SC.stage !== "play") return;
+  SC.hist.push(JSON.stringify({ pts: SC.pts, games: SC.games, left: SC.left, right: SC.right, servTeam: SC.servTeam, changedEnds: SC.changedEnds, done: SC.done, stage: SC.stage, setup: SC.setup }));
+  SC.pts = [...SC.pts]; SC.pts[i]++; SC.right = [...SC.right];
+  if (i === SC.servTeam) SC.right[i] = 1 - SC.right[i];   // serving side wins: server switches service court
+  else SC.servTeam = i;                                   // receiving side wins: they serve, nobody moves
+  if (SC.mode === "league" && !SC.changedEnds && Math.max(...SC.pts) === 15) { SC.changedEnds = true; SC.left = 1 - SC.left; SC.flash = "Change ends"; }
   if (SC.pts[i] >= SC.target) {
     SC.games = [...SC.games, SC.pts]; const [wa, wb] = scGamesWon();
     if (SC.mode === "league" || wa === 2 || wb === 2) { SC.done = true; SC.flash = "Match over"; }
-    else { SC.pts = [0, 0]; SC.swapped = !SC.swapped; SC.flash = `Game ${SC.games.length} to ${i === 0 ? SC.a : SC.b}. Change ends`; }
+    else { SC.pts = [0, 0]; SC.left = 1 - SC.left; SC.stage = "newgame"; SC.setup = { fs: null, fr: null, winner: i }; SC.flash = `Game ${SC.games.length} to ${tn(i)}. Change ends`; }
   }
   scSave(); render(); try { navigator.vibrate && navigator.vibrate(30); } catch (e) {}
 }
@@ -518,35 +537,83 @@ function scUndo() { if (!SC || !SC.hist.length) return; Object.assign(SC, JSON.p
 function scResultText() {
   const gs = SC.games.map(g => `${g[0]}–${g[1]}`).join(", ");
   const w = SC.mode === "ko" ? (scGamesWon()[0] > scGamesWon()[1] ? SC.a : SC.b) : (SC.games[0][0] > SC.games[0][1] ? SC.a : SC.b);
-  return `${SC.label || "Match"}: ${SC.a} vs ${SC.b}, ${gs}. Winner: ${w}.`;
+  return `${SC.label || "Match"}: ${SC.a} vs ${SC.b}, ${gs}. Winner: ${w}.${SC.toss ? " " + SC.toss : ""}`;
+}
+const pick = (field, value, labelTxt, on) => `<button class="chip" style="flex:1 1 45%;padding:10px 8px;font-size:15px" aria-pressed="${on}" data-ts="${field}|${value}">${esc(labelTxt)}</button>`;
+function renderToss() {
+  const u = SC.setup, P = SC.players;
+  const servTeam = u.tw === null || u.tc === null ? null : (u.tc === "serve" ? u.tw : 1 - u.tw);
+  let h = `<div class="sc-head"><h2>${esc(SC.label || "Free game")}</h2><span class="note">${esc(SC.a)} vs ${esc(SC.b)}</span></div>`;
+  h += `<label>1. Who won the toss?</label><div class="chips" style="flex-wrap:wrap">${pick("tw", 0, SC.a, u.tw === 0)}${pick("tw", 1, SC.b, u.tw === 1)}</div>`;
+  if (u.tw !== null) h += `<label>2. ${esc(tn(u.tw))} chose</label><div class="chips" style="flex-wrap:wrap">${pick("tc", "serve", "To serve first", u.tc === "serve")}${pick("tc", "court", "Court side", u.tc === "court")}</div>
+    <p class="note" style="margin:4px 0 0">${u.tc === "serve" ? `So ${esc(tn(1 - u.tw))} choose the court side.` : u.tc === "court" ? `So ${esc(tn(1 - u.tw))} serve first.` : "The other team gets the remaining choice."}</p>`;
+  if (servTeam !== null) {
+    h += `<label>3. Which team is on the LEFT of your screen? (as you face the court)</label><div class="chips" style="flex-wrap:wrap">${pick("lt", 0, SC.a, u.lt === 0)}${pick("lt", 1, SC.b, u.lt === 1)}</div>`;
+    h += `<label>4. Who serves first for ${esc(tn(servTeam))}? (from the right service court)</label><div class="chips" style="flex-wrap:wrap">${pick("fs", 0, P[servTeam][0], u.fs === 0)}${pick("fs", 1, P[servTeam][1], u.fs === 1)}</div>`;
+    h += `<label>5. Who receives first for ${esc(tn(1 - servTeam))}? (standing in the right service court)</label><div class="chips" style="flex-wrap:wrap">${pick("fr", 0, P[1 - servTeam][0], u.fr === 0)}${pick("fr", 1, P[1 - servTeam][1], u.fr === 1)}</div>`;
+  }
+  const ready = servTeam !== null && u.lt !== null && u.fs !== null && u.fr !== null;
+  h += `<div class="sc-tools"><button class="btn pri" id="scStart" ${ready ? "" : "disabled"}>Start match</button></div><div class="sc-tools"><button class="btn" id="scEnd">Cancel and choose another match</button></div>`;
+  return h;
+}
+function renderNewGame() {
+  const u = SC.setup, s = u.winner, P = SC.players, [wa, wb] = scGamesWon();
+  let h = `<div class="sc-head"><h2>Game ${SC.games.length + 1}</h2><span class="note">Games: ${SC.games.map(g => g[0] + "–" + g[1]).join(", ")} (${wa}–${wb})</span></div>`;
+  if (SC.flash) { h += `<div class="banner" role="status">${esc(SC.flash)}</div>`; SC.flash = ""; scSave(); }
+  h += `<p class="note">${esc(tn(s))} won the last game, so they serve first. Teams have changed ends on your screen.</p>`;
+  h += `<label>Who serves first for ${esc(tn(s))}?</label><div class="chips" style="flex-wrap:wrap">${pick("fs", 0, P[s][0], u.fs === 0)}${pick("fs", 1, P[s][1], u.fs === 1)}</div>`;
+  h += `<label>Who receives first for ${esc(tn(1 - s))}?</label><div class="chips" style="flex-wrap:wrap">${pick("fr", 0, P[1 - s][0], u.fr === 0)}${pick("fr", 1, P[1 - s][1], u.fr === 1)}</div>`;
+  h += `<div class="sc-tools"><button class="btn pri" id="ngStart" ${u.fs !== null && u.fr !== null ? "" : "disabled"}>Start game ${SC.games.length + 1}</button><button class="btn" id="scUndo">Undo last point</button></div>`;
+  return h;
 }
 function renderScorer() {
   if (!SC) {
     const d = view.scDay || todayDay();
-    let h = `<p class="note" style="margin:0 0 8px">Pick a match to score. Tap a team’s side to give them the point.</p><label for="scDay">Day</label><select id="scDay">${S.meta.days.map((_, i) => `<option value="${i + 1}"${d == i + 1 ? " selected" : ""}>Day ${i + 1}, ${dayLabel(i + 1)}</option>`).join("")}<option value="ko"${d === "ko" ? " selected" : ""}>Knockouts, ${fmtDate(S.meta.koDate)}</option></select><div class="pick" style="margin-top:10px">`;
+    let h = `<p class="note" style="margin:0 0 8px">Pick a match to score. You’ll record the toss and first server, then tap a team’s side for each rally they win.</p><label for="scDay">Day</label><select id="scDay">${S.meta.days.map((_, i) => `<option value="${i + 1}"${d == i + 1 ? " selected" : ""}>Day ${i + 1}, ${dayLabel(i + 1)}</option>`).join("")}<option value="ko"${d === "ko" ? " selected" : ""}>Knockouts, ${fmtDate(S.meta.koDate)}</option></select><div class="pick" style="margin-top:10px">`;
     if (d === "ko") for (const k of S.ko) h += `<button class="btn" data-scko="${k.id}">${k.time} ${CATN[k.cat]} ${k.label}: ${esc(resolve(k.a))} vs ${esc(resolve(k.b))}</button>`;
-    else for (const m of S.matches.filter(m => m.day === +d).sort((a, b) => mins(a.time) - mins(b.time) || a.court - b.court)) h += `<button class="btn" data-scm="${m.id}">${m.time} C${m.court}: ${esc(label(m))}${done(m) ? " (played)" : ""}</button>`;
+    else for (const m of S.matches.filter(m => m.day === +d).sort((a, b) => mins(a.time) - mins(b.time) || a.court - b.court)) h += `<button class="btn" data-scm="${m.id}">${m.time} C${m.court}: ${esc(label(m))}${m.extra ? " (extra)" : ""}${done(m) ? " (played)" : ""}</button>`;
     return h + `</div><label style="margin-top:16px">Or a friendly game</label><button class="btn" data-scfree="1">Start a free game</button>`;
   }
-  const L = SC.swapped ? 1 : 0, R = 1 - L, nm = [SC.a, SC.b], gw = scGamesWon();
-  const srv = i => SC.server === i ? `Serving from ${SC.pts[i] % 2 === 0 ? "right" : "left"} court` : "";
-  const side = (i, cls) => `<button class="side ${cls}" data-pt="${i}" ${SC.done ? "disabled" : ""}><div class="tn">${esc(nm[i])}</div><div class="pts">${SC.pts[i]}</div><div class="gw">${SC.mode === "ko" ? "Games won: " + gw[i] : ""}</div><div class="srv">${srv(i)}</div></button>`;
+  if (SC.stage === "toss") return renderToss();
+  if (SC.stage === "newgame" && !SC.done) return renderNewGame();
+  const L = SC.left, R = 1 - L, gw = scGamesWon(), sv = scServe();
+  const players = i => [0, 1].map(p => {
+    const inRight = SC.right[i] === p, court = inRight ? "R" : "L";
+    const isS = !SC.done && sv.s === i && sv.sp === p, isR = !SC.done && sv.o === i && sv.rp === p;
+    return `<div style="display:flex;gap:6px;align-items:center;justify-content:center;font:600 14px Barlow,sans-serif;margin-top:4px;${isS ? "background:rgba(255,255,255,.28);border-radius:999px;padding:2px 8px" : ""}"><span style="font-size:11px;background:rgba(0,0,0,.25);border-radius:4px;padding:0 5px">${court}</span>${esc(SC.players[i][p])}${isS ? " 🏸" : isR ? ' <span style="font-size:11px;opacity:.85">(receives)</span>' : ""}</div>`;
+  }).sort(() => 0).join("");
+  const side = (i, cls) => `<button class="side ${cls}" data-pt="${i}" ${SC.done ? "disabled" : ""}><div class="tn">${esc(tn(i))}</div><div class="pts">${SC.pts[i]}</div><div class="gw">${SC.mode === "ko" ? "Games won: " + gw[i] : ""}</div>${players(i)}</button>`;
   let h = `<div class="sc-head"><h2>${esc(SC.label || "Free game")}</h2><span class="note">${SC.mode === "ko" ? "Best of three, each game to 15" : "One game to 30, change ends at 15"}</span></div>`;
   if (SC.games.length && SC.mode === "ko") h += `<div class="note">Games: ${SC.games.map(g => g[0] + "–" + g[1]).join(", ")}</div>`;
   if (SC.flash) h += `<div class="banner" role="status">${esc(SC.flash)}</div>`;
+  if (!SC.done) h += `<div class="alert ok" style="font-size:15px;margin-top:8px">🏸 <b>${esc(sv.server)}</b> serves from the <b>${sv.court}</b> court to <b>${esc(sv.receiver)}</b> · ${SC.pts[sv.s]}–${SC.pts[sv.o]}</div>`;
   h += SC.done ? `<div class="alert ok" style="font-size:16px">${esc(scResultText())}</div>` : `<div class="sc-wrap">${side(L, "l")}${side(R, "r")}</div>`;
-  h += `<div class="sc-tools"><button class="btn" id="scUndo" ${SC.hist.length ? "" : "disabled"}>Undo last point</button>${SC.done ? "" : '<button class="btn" id="scSwap">Swap sides on screen</button>'}</div>`;
+  h += `<div class="sc-tools"><button class="btn" id="scUndo" ${SC.hist.length ? "" : "disabled"}>Undo last rally</button>${SC.done ? "" : '<button class="btn" id="scSwap">Swap sides on screen</button>'}</div>`;
+  if (SC.toss) h += `<p class="note" style="margin-top:6px">${esc(SC.toss)}</p>`;
   if (SC.done) h += `<div class="sc-tools"><button class="btn" id="scCopy">Copy result for WhatsApp</button>${isScorer() && SC.ref ? '<button class="btn acc" id="scSaveRes">Save result for everyone</button>' : ""}</div>`;
   h += `<div class="sc-tools"><button class="btn" id="scEnd">${SC.done ? "Score another match" : "Stop and choose another match"}</button></div>`;
   if (SC.flash) { SC.flash = ""; scSave(); }
   return h;
 }
+function scSetup(field, value) {
+  const u = SC.setup; u[field] = value === "serve" || value === "court" ? value : +value;
+  if (field === "tw" || field === "tc") { u.fs = null; u.fr = null; }
+  scSave(); render();
+}
+function scBegin() {
+  const u = SC.setup, servTeam = u.tc === "serve" ? u.tw : 1 - u.tw;
+  SC.left = u.lt; scStartGame(servTeam, u.fs, u.fr);
+  SC.toss = `Toss: ${tn(u.tw)} won and chose ${u.tc === "serve" ? "to serve" : "court side"}. First serve: ${SC.players[servTeam][u.fs]} to ${SC.players[1 - servTeam][u.fr]}.`;
+  scSave(); render();
+}
+function scBeginGame() { const u = SC.setup; SC.hist.push(JSON.stringify({ pts: SC.pts, games: SC.games, left: SC.left, right: SC.right, servTeam: SC.servTeam, changedEnds: SC.changedEnds, done: SC.done, stage: SC.stage, setup: { ...u, fs: null, fr: null } })); scStartGame(u.winner, u.fs, u.fr); scSave(); render(); }
 async function scSaveResult() {
   const [kind, id] = SC.ref.split("|");
   const prev = kind === "m" ? S.matches.find(x => x.id === id) : null;
   if (prev && done(prev) && !confirm(`This match already has a result (${prev.s1}–${prev.s2}). Replace it with the new score?`)) return;
-  if (kind === "m") await save([{ type: "update", col: "matches", id, fields: { s1: SC.games[0][0], s2: SC.games[0][1] } }], "Result saved for everyone");
-  else { const g = [0, 1, 2].flatMap(i => SC.games[i] ? [...SC.games[i]] : [null, null]); await save([{ type: "update", col: "ko", id, fields: { g } }], "Result saved for everyone"); }
+  const toss = SC.toss || "";
+  if (kind === "m") await save([{ type: "update", col: "matches", id, fields: { s1: SC.games[0][0], s2: SC.games[0][1], toss } }], "Result saved for everyone");
+  else { const g = [0, 1, 2].flatMap(i => SC.games[i] ? [...SC.games[i]] : [null, null]); await save([{ type: "update", col: "ko", id, fields: { g, toss } }], "Result saved for everyone"); }
   SC = null; scSave(); view.tab = "fixtures"; render();
 }
 
@@ -578,7 +645,10 @@ document.addEventListener("click", async e => {
   if (d.scko) { const k = S.ko.find(x => x.id === d.scko); scNew("k|" + k.id, resolve(k.a), resolve(k.b), "ko", `${CATN[k.cat]} ${k.label}`); render(); return; }
   if (d.scfree) { const a = prompt("Team on the left", "Team 1"); if (a === null) return; const b = prompt("Team on the right", "Team 2"); if (b === null) return; const ko = confirm("Best of three games to 15?\nOK = best of three, Cancel = one game to 30"); scNew(null, a || "Team 1", b || "Team 2", ko ? "ko" : "league", "Free game"); render(); return; }
   if (t.id === "scUndo") { scUndo(); return; }
-  if (t.id === "scSwap") { SC.swapped = !SC.swapped; scSave(); render(); return; }
+  if (t.id === "scSwap") { SC.left = 1 - SC.left; scSave(); render(); return; }
+  if (d.ts) { const [f, v] = d.ts.split("|"); scSetup(f, v); return; }
+  if (t.id === "scStart") { scBegin(); return; }
+  if (t.id === "ngStart") { scBeginGame(); return; }
   if (t.id === "scCopy") { const txt = scResultText(); try { await navigator.clipboard.writeText(txt); toast("Result copied. Paste it into WhatsApp."); } catch (err) { prompt("Copy this result:", txt); } return; }
   if (t.id === "scSaveRes") { await scSaveResult(); return; }
   if (t.id === "scEnd") { if (SC.done || confirm("Stop scoring this match? The score so far will be lost.")) { SC = null; scSave(); render(); } return; }

@@ -157,7 +157,9 @@ function resolve(ref) {
 }
 
 // ---------------- rendering ----------------
-const TABS = () => [["fixtures", "Fixtures"], ["scorer", "Scorer"], ["standings", "Standings"], ["knockouts", "Knockouts"], ["teams", "My team"], ["rules", "Rules"], ["changes", "Changes"], ...(isAdmin() ? [["people", "People"]] : [])];
+const TABS = () => isScorer()
+  ? [["fixtures", "Fixtures"], ["scorer", "Scorer"], ["standings", "Standings"], ["knockouts", "Knockouts"], ["teams", "My team"], ["rules", "Rules"], ["changes", "Changes"], ...(isAdmin() ? [["people", "People"]] : [])]
+  : [["fixtures", "Fixtures"], ["standings", "Standings"]];
 function renderHeader() {
   document.getElementById("demo").innerHTML = DEMO ? '<div class="demo">Demo mode: changes stay on this phone. Finish the Firebase setup to share one live view.</div>' : "";
   document.getElementById("net").innerHTML = navigator.onLine ? "" : '<div class="offline">Offline. Showing the last saved data; changes sync when you reconnect.</div>';
@@ -167,6 +169,13 @@ function renderHeader() {
   document.getElementById("who").innerHTML = me.email
     ? `<span class="role">${me.role === "admin" ? "Admin" : me.role === "scorer" ? "Scorer" : "Viewer"}</span><span style="opacity:.8">${esc(me.email)}</span><button class="btn" id="signout">Sign out</button>`
     : `<button class="btn" id="signin">Organiser sign-in</button>`;
+  const standalone = matchMedia("(display-mode: standalone)").matches || navigator.standalone === true;
+  const ios = /iPhone|iPad|iPod/.test(navigator.userAgent);
+  if (!standalone && installEvt) document.getElementById("who").insertAdjacentHTML("afterbegin", `<button class="btn" id="install" style="background:var(--accent);color:var(--accent-ink)">Install app</button>`);
+  let hint = document.getElementById("iosHint");
+  const showHint = !standalone && ios && !sessionStorage.getItem("hbt-hint-off");
+  if (showHint && !hint) { document.body.insertAdjacentHTML("afterbegin", `<div id="iosHint" class="demo" style="background:#24406E">To install: tap <b>Share</b> ⬆︎ then <b>Add to Home Screen</b>. <button class="btn" id="hintOff" style="padding:2px 8px;font-size:12px;margin-left:6px">OK</button></div>`); }
+  if (!showHint && hint) hint.remove();
   document.getElementById("tabs").innerHTML = TABS().map(([k, l]) => `<button role="tab" aria-selected="${view.tab === k}" data-tab="${k}">${l}</button>`).join("");
 }
 function matchCard(m) {
@@ -268,7 +277,7 @@ function render() {
       : `<p class="empty">Fixtures haven’t been loaded yet. The admin needs to sign in and load them.</p>`;
     return;
   }
-  if (view.tab === "people" && !isAdmin()) view.tab = "fixtures";
+  if (!TABS().some(([k]) => k === view.tab)) view.tab = "fixtures";
   M.innerHTML = view.tab === "fixtures" ? renderFixtures() : view.tab === "scorer" ? renderScorer() : view.tab === "standings" ? renderStandings()
     : view.tab === "knockouts" ? koHTML() : view.tab === "teams" ? renderTeams() : view.tab === "rules" ? renderRules() : view.tab === "people" ? renderPeople() : renderChanges();
 }
@@ -426,7 +435,8 @@ async function scSaveResult() {
 
 // ---------------- events ----------------
 let installEvt = null;
-window.addEventListener("beforeinstallprompt", e => { e.preventDefault(); installEvt = e; if (view.tab === "rules") render(); });
+window.addEventListener("beforeinstallprompt", e => { e.preventDefault(); installEvt = e; render(); });
+window.addEventListener("appinstalled", () => { installEvt = null; render(); });
 window.addEventListener("online", render); window.addEventListener("offline", render);
 document.addEventListener("click", async e => {
   const t = e.target.closest("button"); if (!t) return;
@@ -434,7 +444,8 @@ document.addEventListener("click", async e => {
   if (t.id === "signin") { try { await store.signIn(); } catch (err) { alert("Sign-in failed: " + (err.message || err)); } return; }
   if (t.id === "signout") { await store.signOut(); return; }
   if (t.id === "seed") { t.disabled = true; try { await store.seed(); toast("Fixtures loaded"); } catch (err) { alert("Couldn’t load fixtures: " + (err.code || err.message)); t.disabled = false; } return; }
-  if (t.id === "install" && installEvt) { installEvt.prompt(); installEvt = null; return; }
+  if (t.id === "install" && installEvt) { installEvt.prompt(); try { await installEvt.userChoice; } catch (x) {} installEvt = null; render(); return; }
+  if (t.id === "hintOff") { try { sessionStorage.setItem("hbt-hint-off", "1"); } catch (x) {} render(); return; }
   if (t.id === "pAdd") { const em = document.getElementById("pEmail").value.trim().toLowerCase(); if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(em)) { alert("Enter a valid email address."); return; } try { await store.setRole(em, document.getElementById("pRole").value); toast("Added " + em); } catch (err) { alert("Couldn’t add: " + (err.code || err.message)); } return; }
   if (d.rm) { if (confirm(`Remove ${d.rm}?`)) { try { await store.removeRole(d.rm); } catch (err) { alert("Couldn’t remove: " + (err.code || err.message)); } } return; }
   if (d.tab) { view.tab = d.tab; render(); setHash(); window.scrollTo(0, 0); return; }

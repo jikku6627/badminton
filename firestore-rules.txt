@@ -1,0 +1,45 @@
+rules_version = '2';
+// Who can do what:
+//   Everyone (no login)   : read fixtures, results, standings, change log
+//   Scorer (signed in)    : enter / correct results and notes
+//   Admin  (signed in)    : everything, including rescheduling and managing people
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function signedIn() { return request.auth != null && request.auth.token.email_verified == true; }
+    function email() { return request.auth.token.email.lower(); }
+    function isOwner() { return signedIn() && email() == 'paste_your_gmail@gmail.com'; }
+    function hasRole(r) {
+      return signedIn()
+        && exists(/databases/$(database)/documents/roles/$(email()))
+        && get(/databases/$(database)/documents/roles/$(email())).data.role == r;
+    }
+    function isAdmin()  { return isOwner() || hasRole('admin'); }
+    function isScorer() { return isAdmin() || hasRole('scorer'); }
+
+    match /meta/{docId} {
+      allow read: if true;
+      allow write: if isAdmin();
+    }
+    match /matches/{id} {
+      allow read: if true;
+      allow create, delete: if isAdmin();
+      allow update: if isAdmin()
+        || (isScorer() && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['s1','s2','note','updatedBy','updatedAt']));
+    }
+    match /ko/{id} {
+      allow read: if true;
+      allow create, delete: if isAdmin();
+      allow update: if isAdmin()
+        || (isScorer() && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['g','updatedBy','updatedAt']));
+    }
+    match /log/{id} {
+      allow read: if true;
+      allow create: if isScorer();
+      allow update, delete: if isAdmin();
+    }
+    match /roles/{personEmail} {
+      allow read: if signedIn();
+      allow write: if isAdmin();
+    }
+  }
+}

@@ -1,0 +1,16 @@
+{
+  "name": "Home Badminton Tournament 2026",
+  "short_name": "Badminton 2026",
+  "description": "Central Club, Changanacherry: fixtures, live scores, standings and scorer.",
+  "start_url": "./index.html",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#0F3D2F",
+  "theme_color": "#0F3D2F",
+  "icons": [
+    {"src": "icon-192.png", "sizes": "192x192", "type": "image/png"},
+    {"src": "icon-512.png", "sizes": "512x512", "type": "image/png"},
+    {"src": "maskable-192.png", "sizes": "192x192", "type": "image/png", "purpose": "maskable"},
+    {"src": "maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable"}
+  ]
+}

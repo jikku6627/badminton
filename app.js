@@ -18,8 +18,8 @@ const isScorer = () => me.role === "admin" || me.role === "scorer";
 // ---------------- helpers ----------------
 const CATN = { AB: "Cat A & B", CD: "Cat C & D" };
 const COL = (c, p) => `var(--${c}${p})`;
-const TIMES = ["5:00","5:30","6:00","6:30","7:00","7:30","8:00","8:30","9:00","9:30","10:00","10:30","11:00"];
-const KOTIMES = ["6:00","6:30","7:00","7:15","7:30","7:45","8:00","8:15","8:30","8:45","9:00","9:15","9:30","9:45","10:00","10:30"];
+const TIMES = Array.from({ length: 32 }, (_, i) => { const m = 16 * 60 + i * 15; return `${Math.floor(m / 60) - 12}:${String(m % 60).padStart(2, "0")}`; });
+const KOTIMES = TIMES;
 const mins = t => { const [a, b] = t.split(":").map(Number); return a * 60 + b; };
 const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
 const num = v => (v === null || v === undefined || v === "") ? null : Number(v);
@@ -50,7 +50,7 @@ async function firebaseStore() {
       fs.onSnapshot(fs.doc(db, "meta", "config"), d => { S.meta = d.exists() ? d.data() : null; loaded = true; cb(); }, () => { loaded = true; cb(); });
       fs.onSnapshot(fs.collection(db, "matches"), q => { S.matches = q.docs.map(d => ({ id: d.id, ...d.data() })); cb(); });
       fs.onSnapshot(fs.collection(db, "ko"), q => { S.ko = q.docs.map(d => ({ id: d.id, ...d.data() })).sort((a, b) => a.id.localeCompare(b.id)); cb(); });
-      fs.onSnapshot(fs.query(fs.collection(db, "log"), fs.orderBy("at", "desc"), fs.limit(200)), q => { S.log = q.docs.map(d => d.data()); cb(); });
+      fs.onSnapshot(fs.query(fs.collection(db, "log"), fs.orderBy("at", "desc"), fs.limit(300)), q => { S.log = q.docs.map(d => ({ id: d.id, ...d.data() })); cb(); });
     },
     onAuth(cb) {
       au.onAuthStateChanged(auth, async u => {
@@ -73,7 +73,9 @@ async function firebaseStore() {
       const b = fs.writeBatch(db);
       for (const o of ops) {
         if (o.type === "update") b.update(fs.doc(db, o.col, o.id), { ...o.fields, ...stamp() });
-        if (o.type === "log") b.set(fs.doc(fs.collection(db, "log")), { text: o.text, by: me.email, at: fs.serverTimestamp() });
+        if (o.type === "set") b.set(fs.doc(db, o.col, o.id), { ...o.fields, ...stamp() });
+        if (o.type === "delete") b.delete(fs.doc(db, o.col, o.id));
+        if (o.type === "log") b.set(fs.doc(fs.collection(db, "log")), { text: o.text, kind: o.kind || "schedule", changes: o.changes || [], revert: !!o.revert, by: me.email, at: fs.serverTimestamp() });
       }
       await b.commit();
     },
@@ -110,8 +112,10 @@ function demoStore() {
     async signOut() { D.user = null; save(); cbAuth(null, "viewer", ""); },
     async commit(ops) {
       for (const o of ops) {
-        if (o.type === "update") { const list = o.col === "ko" ? D.ko : D.matches; Object.assign(list.find(x => x.id === o.id), o.fields, { updatedBy: me.email }); }
-        if (o.type === "log") D.log.push({ text: o.text, by: me.email, at: { toDate: null, iso: new Date().toISOString() } });
+        if (o.type === "update") { const list = o.col === "ko" ? D.ko : o.col === "log" ? D.log : D.matches; Object.assign(list.find(x => x.id === o.id), o.fields, { updatedBy: me.email }); }
+        if (o.type === "set") (o.col === "ko" ? D.ko : D.matches).push({ id: o.id, ...o.fields });
+        if (o.type === "delete") { if (o.col === "ko") D.ko = D.ko.filter(x => x.id !== o.id); else D.matches = D.matches.filter(x => x.id !== o.id); }
+        if (o.type === "log") D.log.push({ id: "l" + Date.now().toString(36) + Math.random().toString(36).slice(2, 6), text: o.text, kind: o.kind || "schedule", changes: o.changes || [], revert: !!o.revert, by: me.email, at: { iso: new Date().toISOString() } });
       }
       save(); push();
     },
@@ -126,7 +130,7 @@ const done = m => fin(m.s1) && fin(m.s2) && m.s1 !== m.s2;
 function standings(c, p) {
   const n = S.meta.teams[c][p].length, rows = {};
   for (let t = 1; t <= n; t++) rows[t] = { t, P: 0, W: 0, L: 0, F: 0, A: 0 };
-  const ms = S.matches.filter(m => m.cat === c && m.pool === p);
+  const ms = S.matches.filter(m => m.cat === c && m.pool === p && !m.extra);
   for (const m of ms) {
     if (!done(m)) continue;
     const a = rows[m.t1], b = rows[m.t2]; a.P++; b.P++; a.F += m.s1; a.A += m.s2; b.F += m.s2; b.A += m.s1;
@@ -158,14 +162,14 @@ function resolve(ref) {
 
 // ---------------- rendering ----------------
 const TABS = () => isScorer()
-  ? [["fixtures", "Fixtures"], ["scorer", "Scorer"], ["standings", "Standings"], ["knockouts", "Knockouts"], ["teams", "My team"], ["rules", "Rules"], ["changes", "Changes"], ...(isAdmin() ? [["people", "People"]] : [])]
+  ? [["fixtures", "Fixtures"], ["scorer", "Scorer"], ["standings", "Standings"], ["knockouts", "Knockouts"], ["teams", "My team"], ["rules", "Rules"], ["changes", "Activity log"], ...(isAdmin() ? [["people", "People"]] : [])]
   : [["fixtures", "Fixtures"], ["standings", "Standings"]];
 function renderHeader() {
   document.getElementById("demo").innerHTML = DEMO ? '<div class="demo">Demo mode: changes stay on this phone. Finish the Firebase setup to share one live view.</div>' : "";
   document.getElementById("net").innerHTML = navigator.onLine ? "" : '<div class="offline">Offline. Showing the last saved data; changes sync when you reconnect.</div>';
   if (S.meta) { document.getElementById("club").textContent = S.meta.club; document.getElementById("title").innerHTML = esc(S.meta.title.replace(/ 2026$/, "")) + " <span>2026</span>"; }
-  const played = S.matches.filter(done).length;
-  document.getElementById("upd").textContent = S.meta ? `${played} of ${S.matches.length} league matches played` : (loaded ? "" : "Loading…");
+  const league = S.matches.filter(m => !m.extra), played = league.filter(done).length;
+  document.getElementById("upd").textContent = S.meta ? `${played} of ${league.length} league matches played` : (loaded ? "" : "Loading…");
   document.getElementById("who").innerHTML = me.email
     ? `<span class="role">${me.role === "admin" ? "Admin" : me.role === "scorer" ? "Scorer" : "Viewer"}</span><span style="opacity:.8">${esc(me.email)}</span><button class="btn" id="signout">Sign out</button>`
     : `<button class="btn" id="signin">Organiser sign-in</button>`;
@@ -181,7 +185,7 @@ function renderHeader() {
 function matchCard(m) {
   const c = m.cat, p = m.pool, d = done(m), w1 = d && m.s1 > m.s2, w2 = d && m.s2 > m.s1;
   const r = (t, s, w, l) => `<div class="row${w ? " w" : ""}${l ? " l" : ""}"><span class="nm">${p}${t} ${esc(tname(c, p, t))}</span><span class="sc">${fin(s) ? s : ""}</span></div>`;
-  const body = `<div class="meta"><span class="tag">${CATN[c]}, Pool ${p}</span><span>Court ${m.court}</span></div>` + r(m.t1, m.s1, w1, w2) + r(m.t2, m.s2, w2, w1) + (m.note ? `<div class="note">${esc(m.note)}</div>` : "");
+  const body = `<div class="meta"><span class="tag">${CATN[c]}, Pool ${p}${m.extra ? " · Extra match" : ""}</span><span>Court ${m.court}</span></div>` + r(m.t1, m.s1, w1, w2) + r(m.t2, m.s2, w2, w1) + (m.note ? `<div class="note">${esc(m.note)}</div>` : "");
   return isScorer() ? `<button class="card" style="--c:${COL(c, p)}" data-edit="${m.id}">${body}</button>` : `<div class="card" style="--c:${COL(c, p)}">${body}</div>`;
 }
 function todayDay() { const t = new Date(); const iso = `${t.getFullYear()}-${String(t.getMonth() + 1).padStart(2, "0")}-${String(t.getDate()).padStart(2, "0")}`; const i = S.meta.days.indexOf(iso); return i >= 0 ? i + 1 : (iso === S.meta.koDate ? "ko" : 1); }
@@ -194,6 +198,7 @@ function renderFixtures() {
   if (d === "ko") return h + koHTML();
   const ms = S.matches.filter(m => m.day === d);
   h += `<div class="dayhead"><h2>${fmtDate(S.meta.days[d - 1], true)}</h2><span>${ms.length} matches, ${ms.filter(done).length} played</span></div>`;
+  if (isAdmin()) h += `<div class="acts" style="justify-content:flex-start;margin:0 0 10px"><button class="btn pri" data-add="${d}">+ Add a match to this day</button></div>`;
   const times = [...new Set(ms.map(m => m.time))].sort((a, b) => mins(a) - mins(b));
   if (!times.length) h += `<p class="empty">No matches on this day.</p>`;
   for (const t of times) {
@@ -255,9 +260,18 @@ function renderRules() {
   ${installEvt ? '<button class="btn pri" id="install">Install app on this phone</button>' : ""}</div>`;
 }
 function renderChanges() {
-  if (!S.log.length) return `<p class="empty">No changes yet.</p>`;
+  const f = view.logf || "all";
+  const chips = [["all", "All"], ["result", "Results"], ["schedule", "Schedule"], ["people", "People"]].map(([k, l]) => `<button class="chip" aria-pressed="${f === k}" data-logf="${k}">${l}</button>`).join("");
   const when = x => { const d = x.at?.toDate ? x.at.toDate() : (x.at?.iso ? new Date(x.at.iso) : null); return d ? d.toLocaleString("en-GB", { weekday: "short", day: "numeric", month: "short", hour: "numeric", minute: "2-digit" }) : "Just now"; };
-  return `<ul class="log" style="padding-left:18px">${S.log.map(x => `<li><time>${when(x)}${x.by ? " · " + esc(x.by) : ""}</time>${esc(x.text)}</li>`).join("")}</ul>`;
+  const rows = S.log.filter(x => f === "all" || (x.kind || "schedule") === f);
+  let h = `<div class="seg">${chips}</div><p class="note" style="margin:0 0 10px">Every result, schedule change and organiser change, newest first, with who made it.${isAdmin() ? " Tap <b>Undo</b> to put things back the way they were; fixtures and standings update for everyone." : ""}</p>`;
+  if (!rows.length) return h + `<p class="empty">Nothing here yet.</p>`;
+  h += `<ul class="log" style="list-style:none;padding:0">` + rows.map(x => {
+    const rv = x.revertedBy ? `<div class="note" style="color:var(--warn)">Undone by ${esc(x.revertedBy)}${x.revertedAt ? ", " + new Date(x.revertedAt).toLocaleString("en-GB", { day: "numeric", month: "short", hour: "numeric", minute: "2-digit" }) : ""}</div>` : "";
+    const canUndo = isAdmin() && !x.revertedBy && !x.revert && x.changes && x.changes.length;
+    return `<li style="border-bottom:1px solid var(--line);padding:10px 0;display:flex;gap:10px;align-items:flex-start"><div style="flex:1;min-width:0"><time>${when(x)}${x.by ? " · " + esc(x.by) : ""}</time><div${x.revertedBy ? ' style="text-decoration:line-through;opacity:.7"' : ""}>${esc(x.text)}</div>${rv}</div>${canUndo ? `<button class="btn" data-undo="${esc(x.id)}" style="flex:0 0 auto;padding:8px 12px">Undo</button>` : ""}</li>`;
+  }).join("") + `</ul>`;
+  return h;
 }
 function renderPeople() {
   if (!isAdmin()) return "";
@@ -309,21 +323,87 @@ function checkMove(m, day, time, court) {
   }
   return { ...r, occupant };
 }
+const clean = o => { if (!o) return null; const c = JSON.parse(JSON.stringify(o)); delete c.id; delete c.updatedAt; delete c.updatedBy; return c; };
+const val = v => (v === undefined ? null : v);
+function docOf(col, id) { return (col === "ko" ? S.ko : S.matches).find(x => x.id === id) || null; }
+function nameOf(col, id, snap) {
+  const d = (snap && snap.cat) ? snap : docOf(col, id); if (!d) return id;
+  if (col === "ko") return `${CATN[d.cat]} ${d.label}`;
+  return `${tname(d.cat, d.pool, d.t1)} vs ${tname(d.cat, d.pool, d.t2)}`;
+}
+const scoreTxt = (a, b) => (fin(a) && fin(b) ? `${a}–${b}` : "not played");
+const gamesTxt = g => { const x = (g || []); const p = [0, 1, 2].filter(i => fin(x[2 * i]) && fin(x[2 * i + 1])).map(i => `${x[2 * i]}–${x[2 * i + 1]}`); return p.length ? p.join(", ") : "not played"; };
+function autoText(changes) {
+  const out = [];
+  for (const c of changes) {
+    const nm = nameOf(c.col, c.id, c.before || c.after);
+    if (c.type === "set") { out.push(`Added: ${nm}`); continue; }
+    if (c.type === "delete") { out.push(`Deleted: ${nm}`); continue; }
+    const A = c.after, B = c.before;
+    if ("s1" in A || "s2" in A) out.push(`Result ${nm}: ${scoreTxt(A.s1, A.s2)} (was ${scoreTxt(B.s1, B.s2)})`);
+    if ("g" in A) out.push(`Result ${nm}: ${gamesTxt(A.g)} (was ${gamesTxt(B.g)})`);
+    if ("note" in A) out.push(`Note on ${nm}: “${A.note || "(removed)"}”`);
+    if (("time" in A || "court" in A) && c.col === "ko") out.push(`${nm} moved to ${A.time} Court ${A.court}`);
+  }
+  return out.join(" · ") || "Change saved";
+}
 async function save(ops, msg) {
-  try { await store.commit(ops); toast(msg || "Saved for everyone"); }
-  catch (e) { console.error(e); alert(e.code === "permission-denied" ? "You don’t have permission for this change. Ask the admin." : "Couldn’t save. Check your connection and try again."); }
+  const texts = ops.filter(o => o.type === "log").map(o => o.text);
+  const real = ops.filter(o => o.type !== "log");
+  const changes = real.filter(o => o.col === "matches" || o.col === "ko").map(o => {
+    const cur = docOf(o.col, o.id);
+    if (o.type === "update") { const before = {}, after = {}; for (const k of Object.keys(o.fields)) { before[k] = val(cur ? cur[k] : null); after[k] = val(o.fields[k]); } return { col: o.col, id: o.id, type: "update", before: clean(before), after: clean(after) }; }
+    if (o.type === "set") return { col: o.col, id: o.id, type: "set", before: null, after: clean(o.fields) };
+    return { col: o.col, id: o.id, type: "delete", before: clean(cur), after: null };
+  });
+  const schedule = changes.some(c => c.type !== "update" || ["day", "time", "court"].some(k => c.after && k in c.after));
+  let text = texts.join(" · ");
+  if (!ops.noAuto) {
+    const auto = autoText(texts.length ? changes.filter(c => c.type === "update") : changes);
+    if (auto !== "Change saved" || !texts.length) text = [text, auto].filter(Boolean).join(" · ");
+  }
+  if (changes.length || texts.length) real.push({ type: "log", text, kind: ops.kind || (schedule ? "schedule" : "result"), changes, revert: !!ops.noAuto });
+  try { await store.commit(real); toast(msg || "Saved for everyone"); return true; }
+  catch (e) { console.error(e); alert(e.code === "permission-denied" ? "You don’t have permission for this change. Ask the admin." : "Couldn’t save. Check your connection and try again."); return false; }
+}
+async function revertLog(id) {
+  const L = S.log.find(x => x.id === id); if (!L || !L.changes || !L.changes.length) return;
+  const same = (a, b) => JSON.stringify(a ?? null) === JSON.stringify(b ?? null);
+  const later = [];
+  for (const c of L.changes) {
+    const cur = docOf(c.col, c.id);
+    if (c.type === "update" && cur && Object.keys(c.after).some(k => !same(cur[k], c.after[k]))) later.push(nameOf(c.col, c.id));
+    if (c.type === "set" && !cur) later.push(nameOf(c.col, c.id, c.after) + " (already removed)");
+    if (c.type === "delete" && cur) later.push(nameOf(c.col, c.id, c.before) + " (already back)");
+  }
+  let msg = `Undo this change?\n\n${L.text}`;
+  if (later.length) msg += `\n\nCareful: ${later.join(", ")} changed again after this. Undoing will overwrite the later change too.`;
+  if (!confirm(msg)) return;
+  const ops = [];
+  for (const c of [...L.changes].reverse()) {
+    if (c.type === "update") ops.push({ type: "update", col: c.col, id: c.id, fields: c.before });
+    if (c.type === "set") { if (docOf(c.col, c.id)) ops.push({ type: "delete", col: c.col, id: c.id }); }
+    if (c.type === "delete") ops.push({ type: "set", col: c.col, id: c.id, fields: c.before });
+  }
+  ops.push({ type: "update", col: "log", id: L.id, fields: { revertedBy: me.email, revertedAt: new Date().toISOString() } });
+  ops.push({ type: "log", text: `Reverted: ${L.text}` });
+  ops.kind = L.kind; ops.noAuto = true;
+  await save(ops, "Change undone for everyone");
 }
 function openEdit(id) {
   const m = S.matches.find(x => x.id === id); if (!m) return;
   const admin = isAdmin();
   const dOpts = S.meta.days.map((_, i) => `<option value="${i + 1}"${m.day === i + 1 ? " selected" : ""}>Day ${i + 1}, ${dayLabel(i + 1)}</option>`).join("");
   const tOpts = TIMES.map(t => `<option${m.time === t ? " selected" : ""}>${t}</option>`).join("");
-  dlg.innerHTML = `<form method="dialog" class="dlg"><h3>${esc(label(m))}</h3><div class="note">${CATN[m.cat]}, Pool ${m.pool}. ${where(m.day, m.time, m.court)}</div>
+  dlg.innerHTML = `<form method="dialog" class="dlg" novalidate><h3>${esc(label(m))}</h3><div class="note">${CATN[m.cat]}, Pool ${m.pool}${m.extra ? ", extra match (not counted in standings)" : ""}. ${where(m.day, m.time, m.court)}</div>
   <label>Result (leave both blank if not played)</label><div class="grid2"><input id="s1" type="number" inputmode="numeric" min="0" max="60" placeholder="${esc(tname(m.cat, m.pool, m.t1))}" value="${fin(m.s1) ? m.s1 : ""}"><input id="s2" type="number" inputmode="numeric" min="0" max="60" placeholder="${esc(tname(m.cat, m.pool, m.t2))}" value="${fin(m.s2) ? m.s2 : ""}"></div>
   ${admin ? `<label>Reschedule</label><div class="grid3"><select id="ed" aria-label="Day">${dOpts}</select><select id="et" aria-label="Time">${tOpts}</select><select id="ec" aria-label="Court"><option value="1"${m.court === 1 ? " selected" : ""}>Court 1</option><option value="2"${m.court === 2 ? " selected" : ""}>Court 2</option></select></div>` : ""}
   <label for="en">Note (optional, e.g. walkover or reason for change)</label><input id="en" value="${esc(m.note || "")}">
+  <div class="acts" style="justify-content:flex-start;margin-top:8px"><button type="button" class="btn" id="clr">Clear result (not played yet)</button>${admin && m.extra ? '<button type="button" class="btn" id="delx" style="color:var(--warn)">Delete this extra match</button>' : ""}</div>
   <div id="chk"></div><div class="acts"><button class="btn" value="cancel">Cancel</button><button class="btn pri" id="apply" value="apply">Save</button></div></form>`;
   const q = s => dlg.querySelector(s);
+  q("#clr").addEventListener("click", () => { q("#s1").value = ""; q("#s2").value = ""; check(); });
+  if (q("#delx")) q("#delx").addEventListener("click", () => { if (confirm("Delete this extra match?")) { dlg.returnValue = "cancel"; dlg.close(); save([{ type: "delete", col: "matches", id: m.id }, { type: "log", text: `Extra match deleted: ${label(m)}, ${where(m.day, m.time, m.court)}` }], "Match deleted"); } });
   function check() {
     let html = "", bad = false; const s1 = q("#s1").value, s2 = q("#s2").value;
     if ((s1 === "") !== (s2 === "")) { html += `<div class="alert bad">Enter both scores, or leave both blank.</div>`; bad = true; }
@@ -365,10 +445,12 @@ function openEdit(id) {
 function openKO(id) {
   const k = S.ko.find(x => x.id === id), g = k.g || [], admin = isAdmin();
   const v = i => fin(g[i]) ? g[i] : "";
-  dlg.innerHTML = `<form method="dialog" class="dlg"><h3>${CATN[k.cat]} ${k.label}</h3><div class="note">${esc(resolve(k.a))} vs ${esc(resolve(k.b))}</div>
+  dlg.innerHTML = `<form method="dialog" class="dlg" novalidate><h3>${CATN[k.cat]} ${k.label}</h3><div class="note">${esc(resolve(k.a))} vs ${esc(resolve(k.b))}</div>
   ${[0, 1, 2].map(i => `<label>Game ${i + 1}${i === 2 ? " (only if one game all)" : ""}</label><div class="grid2"><input type="number" inputmode="numeric" min="0" max="30" id="g${i}a" value="${v(2 * i)}" placeholder="Team 1"><input type="number" inputmode="numeric" min="0" max="30" id="g${i}b" value="${v(2 * i + 1)}" placeholder="Team 2"></div>`).join("")}
   ${admin ? `<div class="grid2"><div><label>Time</label><select id="kt">${KOTIMES.map(t => `<option${k.time === t ? " selected" : ""}>${t}</option>`).join("")}</select></div><div><label>Court</label><select id="kc"><option value="1"${k.court === 1 ? " selected" : ""}>Court 1</option><option value="2"${k.court === 2 ? " selected" : ""}>Court 2</option></select></div></div>` : ""}
+  <div class="acts" style="justify-content:flex-start;margin-top:8px"><button type="button" class="btn" id="kclr">Clear all games (not played yet)</button></div>
   <div class="acts"><button class="btn" value="cancel">Cancel</button><button class="btn pri" value="apply">Save</button></div></form>`;
+  dlg.querySelector("#kclr").addEventListener("click", () => dlg.querySelectorAll("input[type=number]").forEach(i => i.value = ""));
   dlg.onclose = () => {
     if (dlg.returnValue !== "apply") return; const q = s => dlg.querySelector(s);
     const ng = [0, 1, 2].flatMap(i => [num(q(`#g${i}a`).value), num(q(`#g${i}b`).value)]);
@@ -378,6 +460,38 @@ function openKO(id) {
     if (Object.keys(fields).length) ops.unshift({ type: "update", col: "ko", id: k.id, fields });
     if (ops.length) save(ops);
   };
+  dlg.showModal();
+}
+
+function openAdd(day) {
+  const pools = [];
+  for (const c of ["AB", "CD"]) for (const p of Object.keys(S.meta.teams[c]).sort()) pools.push([`${c}|${p}`, `${CATN[c]}, Pool ${p}`]);
+  dlg.innerHTML = `<form method="dialog" class="dlg" novalidate><h3>Add a match to ${esc(dayLabel(day))}</h3>
+  <div class="note">Use this for replays, tie-breakers or rescheduled games that need a new slot. Extra matches show on the fixtures but don’t count in the pool standings. To move an existing league match, tap that match instead.</div>
+  <label>Pool</label><select id="ap">${pools.map(([v, l]) => `<option value="${v}">${l}</option>`).join("")}</select>
+  <div class="grid2"><div><label>Team 1</label><select id="a1"></select></div><div><label>Team 2</label><select id="a2"></select></div></div>
+  <div class="grid2"><div><label>Time</label><select id="at">${TIMES.map(t => `<option${t === "9:30" ? " selected" : ""}>${t}</option>`).join("")}</select></div><div><label>Court</label><select id="ac"><option value="1">Court 1</option><option value="2">Court 2</option></select></div></div>
+  <label for="an">Note (e.g. replay of the 7:00 match)</label><input id="an">
+  <div id="achk"></div><div class="acts"><button class="btn" value="cancel">Cancel</button><button class="btn pri" id="aok" value="apply">Add match</button></div></form>`;
+  const q = s => dlg.querySelector(s);
+  function teams() { const [c, p] = q("#ap").value.split("|"); const opts = S.meta.teams[c][p].map((n, i) => `<option value="${i + 1}">${p}${i + 1} ${esc(n)}</option>`).join(""); q("#a1").innerHTML = opts; q("#a2").innerHTML = opts; q("#a2").selectedIndex = 1; check(); }
+  function draft() { const [c, p] = q("#ap").value.split("|"); let t1 = +q("#a1").value, t2 = +q("#a2").value; if (t1 > t2) [t1, t2] = [t2, t1]; return { id: "x" + Date.now().toString(36), cat: c, pool: p, t1, t2, day, time: q("#at").value, court: +q("#ac").value, s1: null, s2: null, note: q("#an").value.trim(), extra: true }; }
+  function check() {
+    const m = draft(); let html = "", bad = false;
+    if (m.t1 === m.t2) { html += `<div class="alert bad">Choose two different teams.</div>`; bad = true; }
+    else {
+      const occ = S.matches.find(o => o.day === day && o.time === m.time && o.court === m.court);
+      if (occ) { html += `<div class="alert bad">${esc(label(occ))} is already on Court ${m.court} at ${m.time}. Pick another time or court.</div>`; bad = true; }
+      const r = clashes(m, day, m.time, []);
+      r.errs.forEach(e => html += `<div class="alert bad">${esc(e)}</div>`); if (r.errs.length) bad = true;
+      r.warns.forEach(e => html += `<div class="alert bad" style="background:var(--surface2);color:var(--ink)">${esc(e)}</div>`);
+      if (!bad && !r.warns.length) html += `<div class="alert ok">Slot is free and both teams are available.</div>`;
+    }
+    q("#achk").innerHTML = html; q("#aok").disabled = bad;
+  }
+  q("#ap").addEventListener("change", teams); ["#a1", "#a2", "#at", "#ac"].forEach(s => q(s).addEventListener("change", check)); teams();
+  dlg.onclose = () => { if (dlg.returnValue !== "apply") return; const m = draft(); const { id, ...fields } = m;
+    save([{ type: "set", col: "matches", id, fields }, { type: "log", text: `Extra match added: ${label(m)}, ${where(day, m.time, m.court)}${m.note ? " (" + m.note + ")" : ""}` }], "Match added for everyone"); };
   dlg.showModal();
 }
 
@@ -428,6 +542,8 @@ function renderScorer() {
 }
 async function scSaveResult() {
   const [kind, id] = SC.ref.split("|");
+  const prev = kind === "m" ? S.matches.find(x => x.id === id) : null;
+  if (prev && done(prev) && !confirm(`This match already has a result (${prev.s1}–${prev.s2}). Replace it with the new score?`)) return;
   if (kind === "m") await save([{ type: "update", col: "matches", id, fields: { s1: SC.games[0][0], s2: SC.games[0][1] } }], "Result saved for everyone");
   else { const g = [0, 1, 2].flatMap(i => SC.games[i] ? [...SC.games[i]] : [null, null]); await save([{ type: "update", col: "ko", id, fields: { g } }], "Result saved for everyone"); }
   SC = null; scSave(); view.tab = "fixtures"; render();
@@ -446,11 +562,14 @@ document.addEventListener("click", async e => {
   if (t.id === "seed") { t.disabled = true; try { await store.seed(); toast("Fixtures loaded"); } catch (err) { alert("Couldn’t load fixtures: " + (err.code || err.message)); t.disabled = false; } return; }
   if (t.id === "install" && installEvt) { installEvt.prompt(); try { await installEvt.userChoice; } catch (x) {} installEvt = null; render(); return; }
   if (t.id === "hintOff") { try { sessionStorage.setItem("hbt-hint-off", "1"); } catch (x) {} render(); return; }
-  if (t.id === "pAdd") { const em = document.getElementById("pEmail").value.trim().toLowerCase(); if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(em)) { alert("Enter a valid email address."); return; } try { await store.setRole(em, document.getElementById("pRole").value); toast("Added " + em); } catch (err) { alert("Couldn’t add: " + (err.code || err.message)); } return; }
-  if (d.rm) { if (confirm(`Remove ${d.rm}?`)) { try { await store.removeRole(d.rm); } catch (err) { alert("Couldn’t remove: " + (err.code || err.message)); } } return; }
+  if (t.id === "pAdd") { const em = document.getElementById("pEmail").value.trim().toLowerCase(); if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(em)) { alert("Enter a valid email address."); return; } try { const rl = document.getElementById("pRole").value; await store.setRole(em, rl); await store.commit([{ type: "log", text: `${em} added as ${rl === "admin" ? "Admin" : "Scorer"}`, kind: "people", changes: [] }]); toast("Added " + em); } catch (err) { alert("Couldn’t add: " + (err.code || err.message)); } return; }
+  if (d.rm) { if (confirm(`Remove ${d.rm}?`)) { try { await store.removeRole(d.rm); await store.commit([{ type: "log", text: `${d.rm} removed as organiser`, kind: "people", changes: [] }]); } catch (err) { alert("Couldn’t remove: " + (err.code || err.message)); } } return; }
   if (d.tab) { view.tab = d.tab; render(); setHash(); window.scrollTo(0, 0); return; }
   if (d.day) { view.day = d.day === "ko" ? "ko" : +d.day; render(); setHash(); return; }
   if (d.cat) { view.cat = d.cat; render(); return; }
+  if (d.logf) { view.logf = d.logf; render(); return; }
+  if (d.undo) { await revertLog(d.undo); return; }
+  if (d.add) { openAdd(+d.add); return; }
   if (d.edit) { openEdit(d.edit); return; }
   if (d.ko) { openKO(d.ko); return; }
   if (d.pt != null) { scPoint(+d.pt); return; }

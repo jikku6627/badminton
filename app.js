@@ -4,7 +4,7 @@ import SEED from "./seed.js";
 
 const DEMO = !FIREBASE_CONFIG.apiKey || FIREBASE_CONFIG.apiKey.startsWith("PASTE");
 const SDK = "10.12.2";
-const APP_VERSION = "6";
+const APP_VERSION = "7";
 const OWNER = (OWNER_EMAIL || "").toLowerCase();
 
 // ---------------- state ----------------
@@ -186,7 +186,7 @@ function renderHeader() {
 function matchCard(m) {
   const c = m.cat, p = m.pool, d = done(m), w1 = d && m.s1 > m.s2, w2 = d && m.s2 > m.s1;
   const r = (t, s, w, l) => `<div class="row${w ? " w" : ""}${l ? " l" : ""}"><span class="nm">${p}${t} ${esc(tname(c, p, t))}</span><span class="sc">${fin(s) ? s : ""}</span></div>`;
-  const body = `<div class="meta"><span class="tag">${CATN[c]}, Pool ${p}${m.extra ? " · Extra match" : ""}</span><span>Court ${m.court}</span></div>` + r(m.t1, m.s1, w1, w2) + r(m.t2, m.s2, w2, w1) + (m.note ? `<div class="note">${esc(m.note)}</div>` : "") + (m.toss && isScorer() ? `<div class="note">${esc(m.toss)}</div>` : "");
+  const body = `<div class="meta"><span class="tag">${CATN[c]}, Pool ${p}${m.extra ? " · Extra match" : ""}</span><span>Court ${m.court}</span></div>` + r(m.t1, m.s1, w1, w2) + r(m.t2, m.s2, w2, w1) + (m.note ? `<div class="note">${esc(m.note)}</div>` : "") + (m.toss && isScorer() && done(m) ? `<div class="note">${esc(m.toss)}</div>` : "");
   return isScorer() ? `<button class="card" style="--c:${COL(c, p)}" data-edit="${m.id}">${body}</button>` : `<div class="card" style="--c:${COL(c, p)}">${body}</div>`;
 }
 function todayDay() { const t = new Date(); const iso = `${t.getFullYear()}-${String(t.getMonth() + 1).padStart(2, "0")}-${String(t.getDate()).padStart(2, "0")}`; const i = S.meta.days.indexOf(iso); return i >= 0 ? i + 1 : (iso === S.meta.koDate ? "ko" : 1); }
@@ -428,6 +428,7 @@ function openEdit(id) {
     const ops = [], fields = {}, note = q("#en").value.trim();
     const ns1 = num(q("#s1").value), ns2 = num(q("#s2").value);
     if (ns1 !== (m.s1 ?? null) || ns2 !== (m.s2 ?? null)) { fields.s1 = ns1; fields.s2 = ns2; }
+    if (ns1 === null && ns2 === null && m.toss) fields.toss = "";   // clearing the result also clears the toss
     if ((m.note || "") !== note) fields.note = note;
     if (admin) {
       const day = +q("#ed").value, time = q("#et").value, court = +q("#ec").value;
@@ -457,6 +458,7 @@ function openKO(id) {
     const ng = [0, 1, 2].flatMap(i => [num(q(`#g${i}a`).value), num(q(`#g${i}b`).value)]);
     const ops = [], fields = {};
     if (JSON.stringify(ng) !== JSON.stringify(g.length ? g : [null, null, null, null, null, null])) fields.g = ng;
+    if (ng.every(v => v === null) && k.toss) fields.toss = "";
     if (admin) { const nt = q("#kt").value, nc = +q("#kc").value; if (nt !== k.time || nc !== k.court) { fields.time = nt; fields.court = nc; ops.push({ type: "log", text: `${CATN[k.cat]} ${k.label} moved from ${k.time} Court ${k.court} to ${nt} Court ${nc}` }); } }
     if (Object.keys(fields).length) ops.unshift({ type: "update", col: "ko", id: k.id, fields });
     if (ops.length) save(ops);

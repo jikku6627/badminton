@@ -1,5 +1,5 @@
 // App shell cache so the app opens even with weak signal at the venue.
-const CACHE = "hbt2026-v6";
+const CACHE = "hbt2026-v7";
 const SHELL = ["./", "./index.html", "./app.js", "./config.js", "./seed.js", "./manifest.webmanifest", "./icon-192.png", "./icon-512.png"];
 self.addEventListener("install", e => { e.waitUntil(caches.open(CACHE).then(c => c.addAll(SHELL)).then(() => self.skipWaiting())); });
 self.addEventListener("activate", e => { e.waitUntil(caches.keys().then(ks => Promise.all(ks.filter(k => k !== CACHE).map(k => caches.delete(k)))).then(() => self.clients.claim())); });

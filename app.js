@@ -4,7 +4,7 @@ import SEED from "./seed.js";
 
 const DEMO = !FIREBASE_CONFIG.apiKey || FIREBASE_CONFIG.apiKey.startsWith("PASTE");
 const SDK = "10.12.2";
-const APP_VERSION = "7";
+const APP_VERSION = "8";
 const OWNER = (OWNER_EMAIL || "").toLowerCase();
 
 // ---------------- state ----------------
@@ -97,7 +97,7 @@ function demoStore() {
   // Runs on this phone only (no central database). For trying the app before Firebase is set up.
   const KEY = "hbt-demo";
   let D; try { D = JSON.parse(localStorage.getItem(KEY) || "null"); } catch (e) { D = null; }
-  if (!D) D = { meta: SEED.meta, matches: SEED.matches, ko: SEED.ko, log: [], roles: [], user: null };
+  if (!D) D = JSON.parse(JSON.stringify({ meta: SEED.meta, matches: SEED.matches, ko: SEED.ko, log: [], roles: [], user: null }));
   const save = () => { try { localStorage.setItem(KEY, JSON.stringify(D)); } catch (e) {} };
   let cbData = () => {}, cbAuth = () => {};
   const push = () => { S.meta = D.meta; S.matches = D.matches; S.ko = D.ko; S.log = [...D.log].reverse(); people = D.roles; loaded = true; cbData(); };
@@ -163,7 +163,7 @@ function resolve(ref) {
 
 // ---------------- rendering ----------------
 const TABS = () => isScorer()
-  ? [["fixtures", "Fixtures"], ["scorer", "Scorer"], ["standings", "Standings"], ["knockouts", "Knockouts"], ["teams", "My team"], ["rules", "Rules"], ["changes", "Activity log"], ...(isAdmin() ? [["people", "People"]] : [])]
+  ? [["fixtures", "Fixtures"], ["scorer", "Scorer"], ["standings", "Standings"], ["knockouts", "Knockouts"], ["teams", "My team"], ["rules", "Rules"], ["changes", "Activity log"], ...(isAdmin() ? [["people", "People"], ["check", "Check"]] : [])]
   : [["fixtures", "Fixtures"], ["standings", "Standings"]];
 function renderHeader() {
   document.getElementById("demo").innerHTML = DEMO ? '<div class="demo">Demo mode: changes stay on this phone. Finish the Firebase setup to share one live view.</div>' : "";
@@ -274,6 +274,62 @@ function renderChanges() {
   }).join("") + `</ul>`;
   return h;
 }
+function renderCheck() {
+  if (!isAdmin()) return "";
+  const league = S.matches.filter(m => !m.extra);
+  const seedById = Object.fromEntries(SEED.matches.map(m => [m.id, m]));
+  const pools = [];
+  for (const c of ["AB", "CD"]) for (const p of Object.keys(S.meta.teams[c]).sort()) pools.push([c, p]);
+  const problems = [];
+  let expectedTotal = 0, okPools = 0;
+  let poolRows = "", teamRows = "";
+  for (const [c, p] of pools) {
+    const n = S.meta.teams[c][p].length, exp = n * (n - 1) / 2; expectedTotal += exp;
+    const ms = league.filter(m => m.cat === c && m.pool === p);
+    const pairCount = {};
+    for (const m of ms) { const k = `${Math.min(m.t1, m.t2)}-${Math.max(m.t1, m.t2)}`; pairCount[k] = (pairCount[k] || 0) + 1; }
+    let missing = 0, dup = 0;
+    for (let i = 1; i <= n; i++) for (let j = i + 1; j <= n; j++) {
+      const k = `${i}-${j}`, v = pairCount[k] || 0;
+      if (v === 0) { missing++; problems.push(`Missing match: ${tname(c, p, i)} vs ${tname(c, p, j)} (${CATN[c]}, Pool ${p})`); }
+      if (v > 1) { dup++; problems.push(`Played ${v} times: ${tname(c, p, i)} vs ${tname(c, p, j)} (${CATN[c]}, Pool ${p})`); }
+    }
+    const ok = ms.length === exp && !missing && !dup; if (ok) okPools++;
+    poolRows += `<tr><td style="color:${COL(c, p)};font-weight:700">${CATN[c]}, Pool ${p}</td><td>${n}</td><td>${exp}</td><td>${ms.length}</td><td>${ok ? '<span class="badge">OK</span>' : '<span class="badge" style="background:var(--warn)">CHECK</span>'}</td></tr>`;
+    for (let t = 1; t <= n; t++) {
+      const tm = ms.filter(m => m.t1 === t || m.t2 === t);
+      const c1 = tm.filter(m => m.court === 1).length, c2 = tm.length - c1;
+      const nights = new Set(tm.map(m => m.day)).size;
+      const rightCount = tm.length === n - 1;
+      const even = Math.abs(c1 - c2) <= (tm.length % 2);
+      teamRows += `<tr><td style="color:${COL(c, p)};font-weight:700">${p}${t}</td><td class="tm">${esc(tname(c, p, t))}</td><td>${n - 1}</td><td>${tm.length}</td><td>${nights}</td><td>${c1}/${c2}${even ? "" : " ⚠"}</td><td>${rightCount ? '<span class="badge">OK</span>' : '<span class="badge" style="background:var(--warn)">CHECK</span>'}</td></tr>`;
+      if (!rightCount) problems.push(`${tname(c, p, t)} has ${tm.length} league matches; should have ${n - 1}`);
+    }
+  }
+  // same court and time used twice; same team with no break
+  const slot = {};
+  for (const m of S.matches) { const k = `${m.day}|${m.time}|${m.court}`; (slot[k] = slot[k] || []).push(m); }
+  for (const [k, list] of Object.entries(slot)) if (list.length > 1) { const [d, t, ct] = k.split("|"); problems.push(`Two matches on Court ${ct} at ${t}, ${dayLabel(+d)}: ${list.map(label).join(" and ")}`); }
+  const byTeamDay = {};
+  for (const m of S.matches) for (const key of teamKeys(m)) (byTeamDay[key + "|" + m.day] = byTeamDay[key + "|" + m.day] || []).push(m);
+  for (const [k, list] of Object.entries(byTeamDay)) {
+    const s = [...list].sort((a, b) => mins(a.time) - mins(b.time));
+    for (let i = 1; i < s.length; i++) if (mins(s[i].time) - mins(s[i - 1].time) < 60) { const [c, p, t] = k.split("|"); problems.push(`${tname(c, p, +t)} has no break on ${dayLabel(s[i].day)}: ${s[i - 1].time} and ${s[i].time}`); }
+  }
+  // differences from the final fixtures
+  const moved = league.filter(m => seedById[m.id] && (seedById[m.id].day !== m.day || seedById[m.id].time !== m.time || seedById[m.id].court !== m.court));
+  const extras = S.matches.filter(m => m.extra);
+  const allOk = !problems.length && league.length === expectedTotal;
+  let h = `<div class="alert ${allOk ? "ok" : "bad"}" style="font-size:16px">${allOk ? `<b>All OK.</b> ${league.length} league matches; every team plays every other team in its pool exactly once.` : `<b>${problems.length} thing${problems.length === 1 ? "" : "s"} to check.</b> ${league.length} of ${expectedTotal} league matches found.`}</div>`;
+  if (problems.length) h += `<ul style="margin:10px 0 0 18px">${problems.map(x => `<li style="margin-bottom:6px">${esc(x)}</li>`).join("")}</ul>`;
+  h += `<h3 class="cond" style="font-size:20px;margin:18px 0 6px">Pools</h3><div class="tablewrap"><table><thead><tr><th style="text-align:left">Pool</th><th>Teams</th><th>Should have</th><th>Has</th><th>Status</th></tr></thead><tbody>${poolRows}<tr><td><b>Total</b></td><td></td><td><b>${expectedTotal}</b></td><td><b>${league.length}</b></td><td>${okPools === pools.length ? '<span class="badge">OK</span>' : '<span class="badge" style="background:var(--warn)">CHECK</span>'}</td></tr></tbody></table></div>`;
+  h += `<h3 class="cond" style="font-size:20px;margin:18px 0 6px">Changed from the final fixtures</h3>`;
+  h += moved.length ? `<p class="note" style="margin:0 0 6px">These league matches are no longer where the final PDF put them. That’s fine if you moved them on purpose. Tap one to open it.</p><div class="pick">${moved.map(m => { const o = seedById[m.id]; return `<button class="btn" data-edit="${m.id}" style="text-align:left">${esc(label(m))}<br><small>Final PDF: ${esc(where(o.day, o.time, o.court))} · Now: ${esc(where(m.day, m.time, m.court))}</small></button>`; }).join("")}</div>` : `<p class="note">No league match has moved. The schedule matches the final PDF exactly.</p>`;
+  if (extras.length) h += `<p class="note" style="margin-top:10px">Extra matches (not counted in standings): ${extras.map(m => esc(label(m)) + " – " + esc(where(m.day, m.time, m.court))).join("; ")}</p>`;
+  h += `<h3 class="cond" style="font-size:20px;margin:18px 0 6px">Every team</h3><div class="tablewrap"><table><thead><tr><th>Code</th><th style="text-align:left">Team</th><th>Should play</th><th>Has</th><th>Nights</th><th>Court 1/2</th><th>Status</th></tr></thead><tbody>${teamRows}</tbody></table></div>`;
+  return h;
+}
+
 function renderPeople() {
   if (!isAdmin()) return "";
   return `<p class="note" style="margin:0 0 10px">Viewers don’t need an account. Add the Google (Gmail) address of each organiser. <b>Scorers</b> can enter results; <b>Admins</b> can also reschedule matches and manage people. They sign in with “Organiser sign-in”.</p>
@@ -294,7 +350,7 @@ function render() {
   }
   if (!TABS().some(([k]) => k === view.tab)) view.tab = "fixtures";
   M.innerHTML = view.tab === "fixtures" ? renderFixtures() : view.tab === "scorer" ? renderScorer() : view.tab === "standings" ? renderStandings()
-    : view.tab === "knockouts" ? koHTML() : view.tab === "teams" ? renderTeams() : view.tab === "rules" ? renderRules() : view.tab === "people" ? renderPeople() : renderChanges();
+    : view.tab === "knockouts" ? koHTML() : view.tab === "teams" ? renderTeams() : view.tab === "rules" ? renderRules() : view.tab === "people" ? renderPeople() : view.tab === "check" ? renderCheck() : renderChanges();
 }
 
 // ---------------- editing ----------------
@@ -660,7 +716,7 @@ document.addEventListener("change", e => {
   if (e.target.id === "teamSel") { view.team = e.target.value; try { localStorage.setItem("hbt-team", view.team); } catch (x) {} render(); }
 });
 function setHash() { const tok = view.tab === "fixtures" ? (view.day === "ko" ? "ko" : "d" + view.day) : view.tab; try { history.replaceState(null, "", "#" + tok); } catch (e) {} }
-function fromHash() { const h = (location.hash || "").slice(1); if (/^d[1-7]$/.test(h)) { view.tab = "fixtures"; view.day = +h.slice(1); } else if (h === "ko") { view.tab = "fixtures"; view.day = "ko"; } else if (["scorer", "standings", "knockouts", "teams", "rules", "changes", "people"].includes(h)) view.tab = h; }
+function fromHash() { const h = (location.hash || "").slice(1); if (/^d[1-7]$/.test(h)) { view.tab = "fixtures"; view.day = +h.slice(1); } else if (h === "ko") { view.tab = "fixtures"; view.day = "ko"; } else if (["scorer", "standings", "knockouts", "teams", "rules", "changes", "people", "check"].includes(h)) view.tab = h; }
 
 // ---------------- start ----------------
 try { view.team = localStorage.getItem("hbt-team") || ""; } catch (e) {}

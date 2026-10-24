@@ -4,7 +4,7 @@ import SEED from "./seed.js";
 
 const DEMO = !FIREBASE_CONFIG.apiKey || FIREBASE_CONFIG.apiKey.startsWith("PASTE");
 const SDK = "10.12.2";
-const APP_VERSION = "10";
+const APP_VERSION = "11";
 const OWNER = (OWNER_EMAIL || "").toLowerCase();
 
 // ---------------- state ----------------
@@ -323,6 +323,7 @@ function renderCheck() {
     const s = [...list].sort((a, b) => mins(a.time) - mins(b.time));
     for (let i = 1; i < s.length; i++) if (mins(s[i].time) - mins(s[i - 1].time) < 60) { const [c, p, t] = k.split("|"); problems.push(`${tname(c, p, +t)} has no break on ${dayLabel(s[i].day)}: ${s[i - 1].time} and ${s[i].time}`); }
   }
+  for (const m of S.matches) if (!TIMES.includes(m.time)) problems.push(`Invalid time “${m.time}” for ${label(m)} on ${dayLabel(m.day)}. Open the match and pick a proper time.`);
   // differences from the final fixtures
   const moved = league.filter(m => seedById[m.id] && (seedById[m.id].day !== m.day || seedById[m.id].time !== m.time || seedById[m.id].court !== m.court));
   const extras = S.matches.filter(m => m.extra);
@@ -459,7 +460,7 @@ function openEdit(id) {
   const m = S.matches.find(x => x.id === id); if (!m) return;
   const admin = isAdmin();
   const dOpts = S.meta.days.map((_, i) => `<option value="${i + 1}"${m.day === i + 1 ? " selected" : ""}>Day ${i + 1}, ${dayLabel(i + 1)}</option>`).join("");
-  const tOpts = TIMES.map(t => `<option${m.time === t ? " selected" : ""}>${t}</option>`).join("");
+  const tOpts = (TIMES.includes(m.time) ? "" : `<option selected>${esc(m.time)}</option>`) + TIMES.map(t => `<option${m.time === t ? " selected" : ""}>${t}</option>`).join("");
   dlg.innerHTML = `<form method="dialog" class="dlg" novalidate><h3>${esc(label(m))}</h3><div class="note">${CATN[m.cat]}, Pool ${m.pool}${m.extra ? ", extra match (not counted in standings)" : ""}. ${where(m.day, m.time, m.court)}</div>
   <label>Result (leave both blank if not played)</label><div class="grid2"><input id="s1" type="number" inputmode="numeric" min="0" max="60" placeholder="${esc(tname(m.cat, m.pool, m.t1))}" value="${fin(m.s1) ? m.s1 : ""}"><input id="s2" type="number" inputmode="numeric" min="0" max="60" placeholder="${esc(tname(m.cat, m.pool, m.t2))}" value="${fin(m.s2) ? m.s2 : ""}"></div>
   ${admin ? `<label>Reschedule</label><div class="grid3"><select id="ed" aria-label="Day">${dOpts}</select><select id="et" aria-label="Time">${tOpts}</select><select id="ec" aria-label="Court"><option value="1"${m.court === 1 ? " selected" : ""}>Court 1</option><option value="2"${m.court === 2 ? " selected" : ""}>Court 2</option></select></div>` : ""}
@@ -684,14 +685,14 @@ async function scSaveResult() {
 }
 
 // ---------------- move planner (My team, Admin) ----------------
-const hm = m => `${Math.floor(m / 60) - 12}:${String(m % 60).padStart(2, "0")}`;
+const hm = m => `${Math.floor(m / 60)}:${String(m % 60).padStart(2, "0")}`;
 const keyOf = (m, t) => `${m.cat}|${m.pool}|${t}`;
 const tName = k => { const [c, p, t] = k.split("|"); return tname(c, p, +t); };
 function slotsFor(arr, d) {
   const ms = arr.filter(x => x.day === d), times = [...new Set(ms.map(x => x.time))].sort((a, b) => mins(a) - mins(b)), out = [];
   for (const t of times) for (const c of [1, 2]) out.push({ day: d, time: t, court: c, occ: ms.find(x => x.time === t && x.court === c) || null });
-  const last = times.length ? mins(times[times.length - 1]) : 18 * 60 + 30;
-  if (last + 30 <= 22 * 60 + 30) for (const c of [1, 2]) out.push({ day: d, time: hm(last + 30), court: c, occ: null, extend: true });
+  const last = times.length ? mins(times[times.length - 1]) : 6 * 60 + 30;
+  if (last + 30 <= 10 * 60 + 30 && TIMES.includes(hm(last + 30))) for (const c of [1, 2]) out.push({ day: d, time: hm(last + 30), court: c, occ: null, extend: true });
   return out;
 }
 function nightOf(arr, k, d) { return arr.filter(x => x.day === d && teamKeys(x).includes(k)).sort((a, b) => mins(a.time) - mins(b.time)); }

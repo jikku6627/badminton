@@ -4,7 +4,7 @@ import SEED from "./seed.js";
 
 const DEMO = !FIREBASE_CONFIG.apiKey || FIREBASE_CONFIG.apiKey.startsWith("PASTE");
 const SDK = "10.12.2";
-const APP_VERSION = "8";
+const APP_VERSION = "9";
 const OWNER = (OWNER_EMAIL || "").toLowerCase();
 
 // ---------------- state ----------------
@@ -199,7 +199,8 @@ function renderFixtures() {
   if (d === "ko") return h + koHTML();
   const ms = S.matches.filter(m => m.day === d);
   h += `<div class="dayhead"><h2>${fmtDate(S.meta.days[d - 1], true)}</h2><span>${ms.length} matches, ${ms.filter(done).length} played</span></div>`;
-  if (isAdmin()) h += `<div class="acts" style="justify-content:flex-start;margin:0 0 10px"><button class="btn pri" data-add="${d}">+ Add a match to this day</button></div>`;
+  if (isAdmin()) h += `<div class="acts" style="justify-content:flex-start;margin:0 0 10px;flex-wrap:wrap"><button class="btn ${view.arrange ? "acc" : "pri"}" id="arrange">${view.arrange ? "✓ Done arranging" : "⇅ Arrange / swap matches"}</button><button class="btn" data-add="${d}">+ Add a match to this day</button></div>`;
+  if (isAdmin() && view.arrange) return h + renderArrange(d, ms);
   const times = [...new Set(ms.map(m => m.time))].sort((a, b) => mins(a) - mins(b));
   if (!times.length) h += `<p class="empty">No matches on this day.</p>`;
   for (const t of times) {
@@ -349,6 +350,7 @@ function render() {
     return;
   }
   if (!TABS().some(([k]) => k === view.tab)) view.tab = "fixtures";
+  M.classList.toggle("wide", !!(view.arrange && view.tab === "fixtures" && isAdmin()));
   M.innerHTML = view.tab === "fixtures" ? renderFixtures() : view.tab === "scorer" ? renderScorer() : view.tab === "standings" ? renderStandings()
     : view.tab === "knockouts" ? koHTML() : view.tab === "teams" ? renderTeams() : view.tab === "rules" ? renderRules() : view.tab === "people" ? renderPeople() : view.tab === "check" ? renderCheck() : renderChanges();
 }
@@ -675,6 +677,136 @@ async function scSaveResult() {
   SC = null; scSave(); view.tab = "fixtures"; render();
 }
 
+// ---------------- arrange mode: drag or tap to swap, with a schedule assistant ----------------
+(function addArrangeCss() {
+  const css = `
+  main.wide{max-width:1280px}
+  .arr-wrap{display:grid;grid-template-columns:minmax(0,1fr);gap:16px}
+  @media (min-width:1000px){ .arr-wrap{grid-template-columns:minmax(0,1fr) 340px} .arr-side{position:sticky;top:150px;align-self:start;max-height:calc(100vh - 170px);overflow:auto} }
+  .arr-side{background:var(--surface);border:1px solid var(--line);border-radius:10px;padding:14px;font-size:14px}
+  .arr-side h3{margin:0 0 6px;font:800 20px "Barlow Condensed",sans-serif}
+  .arr-side h4{margin:12px 0 4px;font:700 15px Barlow,sans-serif}
+  .arr-side ul{margin:0;padding-left:18px}.arr-side li{margin-bottom:4px}
+  .drag{cursor:grab;user-select:none;-webkit-user-select:none}
+  .drag.sel{outline:3px solid var(--accent);outline-offset:2px}
+  .drop.hint{outline:2px dashed var(--accent);outline-offset:2px}
+  .ghost{position:fixed;z-index:50;pointer-events:none;opacity:.9;width:280px;box-shadow:0 10px 30px rgba(0,0,0,.35);transform:rotate(-2deg)}
+  .over{outline:3px solid var(--win)!important;outline-offset:2px}`;
+  const st = document.createElement("style"); st.textContent = css; document.head.appendChild(st);
+})();
+function arrangeCard(m) {
+  const c = m.cat, p = m.pool, d = done(m);
+  const sel = view.sel === m.id ? " sel" : "";
+  return `<div class="card drag drop${sel}" style="--c:${COL(c, p)}" data-mid="${m.id}"><div class="meta"><span class="tag">${CATN[c]}, Pool ${p}${m.extra ? " · Extra" : ""}</span><span>Court ${m.court}</span></div><div class="row"><span class="nm">${p}${m.t1} ${esc(tname(c, p, m.t1))}</span><span class="sc">${d ? m.s1 : ""}</span></div><div class="row"><span class="nm">${p}${m.t2} ${esc(tname(c, p, m.t2))}</span><span class="sc">${d ? m.s2 : ""}</span></div></div>`;
+}
+function dayIssues(d) {
+  const ms = S.matches.filter(m => m.day === d), errs = [], twice = [];
+  const slot = {};
+  for (const m of ms) { const k = `${m.time}|${m.court}`; (slot[k] = slot[k] || []).push(m); }
+  for (const [k, l] of Object.entries(slot)) if (l.length > 1) { const [t, c] = k.split("|"); errs.push(`Two matches on Court ${c} at ${t}`); }
+  const byTeam = {};
+  for (const m of ms) for (const k of teamKeys(m)) (byTeam[k] = byTeam[k] || []).push(m);
+  for (const [k, l] of Object.entries(byTeam)) {
+    if (l.length < 2) continue;
+    const [c, p, t] = k.split("|"), s = [...l].sort((a, b) => mins(a.time) - mins(b.time)), times = s.map(m => m.time);
+    let gapBad = false; for (let i = 1; i < s.length; i++) if (mins(s[i].time) - mins(s[i - 1].time) < 60) gapBad = true;
+    (gapBad ? errs : twice).push(`${tname(c, p, +t)}: ${times.join(" and ")}${gapBad ? " (no break)" : ""}`);
+  }
+  return { ms, errs, twice };
+}
+function overallCheck() {
+  const league = S.matches.filter(m => !m.extra); let exp = 0, bad = 0;
+  for (const c of ["AB", "CD"]) for (const p of Object.keys(S.meta.teams[c])) {
+    const n = S.meta.teams[c][p].length; exp += n * (n - 1) / 2;
+    const seen = {}; for (const m of league.filter(m => m.cat === c && m.pool === p)) { const k = `${Math.min(m.t1, m.t2)}-${Math.max(m.t1, m.t2)}`; seen[k] = (seen[k] || 0) + 1; }
+    for (let i = 1; i <= n; i++) for (let j = i + 1; j <= n; j++) if ((seen[`${i}-${j}`] || 0) !== 1) bad++;
+  }
+  let clash = 0; for (let d = 1; d <= S.meta.days.length; d++) clash += dayIssues(d).errs.length;
+  return { ok: !bad && !clash && league.length === exp, bad: bad + clash, count: league.length, exp };
+}
+function assistant(d) {
+  const { ms, errs, twice } = dayIssues(d);
+  const c1 = ms.filter(m => m.court === 1).length, c2 = ms.length - c1;
+  const times = [...new Set(ms.map(m => m.time))].sort((a, b) => mins(a) - mins(b));
+  const free = times.length * 2 - ms.length;
+  const seedById = Object.fromEntries(SEED.matches.map(m => [m.id, m]));
+  const moved = ms.filter(m => !m.extra && seedById[m.id] && (seedById[m.id].day !== m.day || seedById[m.id].time !== m.time || seedById[m.id].court !== m.court));
+  const away = S.matches.filter(m => !m.extra && seedById[m.id] && seedById[m.id].day === d && m.day !== d);
+  const oc = overallCheck();
+  let h = `<h3>Schedule assistant</h3><div class="note">${esc(fmtDate(S.meta.days[d - 1], true))}</div>`;
+  h += `<h4>Tonight</h4><ul><li>${ms.length} matches: Court 1 ${c1}, Court 2 ${c2}</li><li>${free} free court spot${free === 1 ? "" : "s"}${times.length ? `, last start ${times[times.length - 1]} PM` : ""}</li></ul>`;
+  h += `<h4 style="color:${errs.length ? "var(--warn)" : "var(--win)"}">${errs.length ? "Needs fixing" : "No clashes"}</h4>${errs.length ? `<ul>${errs.map(x => `<li>${esc(x)}</li>`).join("")}</ul>` : ""}`;
+  h += `<h4>Teams playing twice tonight (${twice.length})</h4>${twice.length ? `<ul>${twice.map(x => `<li>${esc(x)}</li>`).join("")}</ul>` : '<div class="note">None</div>'}`;
+  h += `<h4>Changed from the final PDF</h4>${moved.length || away.length ? `<ul>${moved.map(m => `<li>${esc(label(m))}: was ${esc(where(seedById[m.id].day, seedById[m.id].time, seedById[m.id].court))}</li>`).join("")}${away.map(m => `<li>${esc(label(m))}: moved to ${esc(where(m.day, m.time, m.court))}</li>`).join("")}</ul>` : '<div class="note">Nothing tonight</div>'}`;
+  h += `<h4>Whole tournament</h4><div class="note" style="color:${oc.ok ? "var(--win)" : "var(--warn)"}">${oc.ok ? `All OK: ${oc.count} league matches, every pairing once.` : `${oc.bad} issue(s). Open the Check tab for details.`}</div>`;
+  h += `<h4>How to swap</h4><div class="note"><b>Computer:</b> drag a match onto another match (swaps them) or onto a free court (moves it).<br><b>Phone:</b> tap a match, then tap the match or free court to swap with.</div>`;
+  return h;
+}
+function renderArrange(d, ms) {
+  const times = [...new Set(ms.map(m => m.time))].sort((a, b) => mins(a) - mins(b));
+  let rows = "";
+  for (const t of times) {
+    const c1 = ms.find(m => m.time === t && m.court === 1), c2 = ms.find(m => m.time === t && m.court === 2);
+    const free = c => `<div class="card free drop" data-free="${d}|${t}|${c}">Court ${c} free</div>`;
+    rows += `<div class="slot"><div class="time">${t}<small>PM</small></div><div class="courts">${c1 ? arrangeCard(c1) : free(1)}${c2 ? arrangeCard(c2) : free(2)}</div></div>`;
+  }
+  const selM = view.sel && S.matches.find(m => m.id === view.sel);
+  const banner = selM ? `<div class="banner" style="font-size:16px;margin:0 0 10px">Selected: ${esc(label(selM))} (${selM.time}, Court ${selM.court}). Tap where it should go, or tap it again to cancel.</div>` : "";
+  return `${banner}<div class="arr-wrap"><div>${rows || '<p class="empty">No matches on this day.</p>'}</div><aside class="arr-side">${assistant(d)}</aside></div>`;
+}
+async function swapTo(aId, target) {
+  const a = S.matches.find(m => m.id === aId); if (!a) return;
+  let b = null, day, time, court;
+  if (target.mid) { b = S.matches.find(m => m.id === target.mid); if (!b || b.id === a.id) return; day = b.day; time = b.time; court = b.court; }
+  else { [day, time, court] = target.free.split("|"); day = +day; court = +court; }
+  const ra = clashes(a, day, time, b ? [b.id] : []);
+  const rb = b ? clashes(b, a.day, a.time, [a.id]) : { errs: [], warns: [] };
+  const errs = [...ra.errs, ...rb.errs], warns = [...ra.warns, ...rb.warns];
+  const what = b ? `Swap\n• ${label(a)} → ${time} Court ${court}\n• ${label(b)} → ${a.time} Court ${a.court}` : `Move ${label(a)} to ${time} Court ${court}`;
+  let msg = what;
+  if (errs.length) msg += `\n\nProblem:\n• ${errs.join("\n• ")}`;
+  if (warns.length) msg += `\n\nNote:\n• ${warns.join("\n• ")}`;
+  msg += errs.length ? "\n\nDo it anyway?" : "\n\nGo ahead?";
+  if (!confirm(msg)) return;
+  const ops = [{ type: "update", col: "matches", id: a.id, fields: { day, time, court } }];
+  if (b) ops.push({ type: "update", col: "matches", id: b.id, fields: { day: a.day, time: a.time, court: a.court } });
+  ops.push({ type: "log", text: b ? `Swapped: ${label(a)} (${where(a.day, a.time, a.court)}) ↔ ${label(b)} (${where(b.day, b.time, b.court)})` : `${label(a)} moved from ${where(a.day, a.time, a.court)} to ${where(day, time, court)}` });
+  view.sel = null;
+  await save(ops, b ? "Swapped for everyone" : "Moved for everyone");
+}
+// pointer drag for mouse and pen (touch uses tap-to-select)
+let drag = null;
+document.addEventListener("pointerdown", e => {
+  if (!view.arrange || e.pointerType === "touch") return;
+  const card = e.target.closest(".drag"); if (!card) return;
+  drag = { id: card.dataset.mid, x: e.clientX, y: e.clientY, card, ghost: null, moved: false };
+});
+document.addEventListener("pointermove", e => {
+  if (!drag) return;
+  if (!drag.moved && Math.hypot(e.clientX - drag.x, e.clientY - drag.y) < 6) return;
+  if (!drag.moved) { drag.moved = true; drag.ghost = drag.card.cloneNode(true); drag.ghost.classList.add("ghost"); document.body.appendChild(drag.ghost); document.querySelectorAll(".drop").forEach(x => x !== drag.card && x.classList.add("hint")); }
+  drag.ghost.style.left = e.clientX - 140 + "px"; drag.ghost.style.top = e.clientY - 30 + "px";
+  document.querySelectorAll(".over").forEach(x => x.classList.remove("over"));
+  drag.ghost.style.display = "none"; const under = document.elementFromPoint(e.clientX, e.clientY); drag.ghost.style.display = "";
+  const tgt = under && under.closest(".drop"); if (tgt && tgt !== drag.card) tgt.classList.add("over");
+});
+document.addEventListener("pointerup", async e => {
+  if (!drag) return;
+  const d = drag; drag = null;
+  if (!d.moved) return; // a plain click: handled by the click handler (tap-to-select)
+  d.ghost.remove(); document.querySelectorAll(".hint,.over").forEach(x => x.classList.remove("hint", "over"));
+  const under = document.elementFromPoint(e.clientX, e.clientY), tgt = under && under.closest(".drop");
+  d.card.dataset.justDragged = "1"; setTimeout(() => { if (d.card) delete d.card.dataset.justDragged; }, 50);
+  if (tgt && tgt !== d.card) await swapTo(d.id, tgt.dataset.mid ? { mid: tgt.dataset.mid } : { free: tgt.dataset.free });
+});
+document.addEventListener("click", async e => {
+  if (!view.arrange) return;
+  const el = e.target.closest("[data-mid],[data-free]"); if (!el || el.dataset.justDragged) return;
+  if (el.dataset.mid && !view.sel) { view.sel = el.dataset.mid; render(); return; }
+  if (el.dataset.mid && view.sel === el.dataset.mid) { view.sel = null; render(); return; }
+  if (view.sel) { const id = view.sel; await swapTo(id, el.dataset.mid ? { mid: el.dataset.mid } : { free: el.dataset.free }); render(); }
+});
+
 // ---------------- events ----------------
 let installEvt = null;
 window.addEventListener("beforeinstallprompt", e => { e.preventDefault(); installEvt = e; render(); });
@@ -691,10 +823,11 @@ document.addEventListener("click", async e => {
   if (t.id === "pAdd") { const em = document.getElementById("pEmail").value.trim().toLowerCase(); if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(em)) { alert("Enter a valid email address."); return; } try { const rl = document.getElementById("pRole").value; await store.setRole(em, rl); await store.commit([{ type: "log", text: `${em} added as ${rl === "admin" ? "Admin" : "Scorer"}`, kind: "people", changes: [] }]); toast("Added " + em); } catch (err) { alert("Couldn’t add: " + (err.code || err.message)); } return; }
   if (d.rm) { if (confirm(`Remove ${d.rm}?`)) { try { await store.removeRole(d.rm); await store.commit([{ type: "log", text: `${d.rm} removed as organiser`, kind: "people", changes: [] }]); } catch (err) { alert("Couldn’t remove: " + (err.code || err.message)); } } return; }
   if (d.tab) { view.tab = d.tab; render(); setHash(); window.scrollTo(0, 0); return; }
-  if (d.day) { view.day = d.day === "ko" ? "ko" : +d.day; render(); setHash(); return; }
+  if (d.day) { view.day = d.day === "ko" ? "ko" : +d.day; view.sel = null; render(); setHash(); return; }
   if (d.cat) { view.cat = d.cat; render(); return; }
   if (d.logf) { view.logf = d.logf; render(); return; }
   if (d.undo) { await revertLog(d.undo); return; }
+  if (t.id === "arrange") { view.arrange = !view.arrange; view.sel = null; render(); return; }
   if (d.add) { openAdd(+d.add); return; }
   if (d.edit) { openEdit(d.edit); return; }
   if (d.ko) { openKO(d.ko); return; }

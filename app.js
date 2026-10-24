@@ -4,7 +4,7 @@ import SEED from "./seed.js";
 
 const DEMO = !FIREBASE_CONFIG.apiKey || FIREBASE_CONFIG.apiKey.startsWith("PASTE");
 const SDK = "10.12.2";
-const APP_VERSION = "9";
+const APP_VERSION = "10";
 const OWNER = (OWNER_EMAIL || "").toLowerCase();
 
 // ---------------- state ----------------
@@ -248,7 +248,13 @@ function renderTeams() {
     const ms = S.matches.filter(m => m.cat === c && m.pool === p && (m.t1 == t || m.t2 == t)).sort((a, b) => a.day - b.day || mins(a.time) - mins(b.time));
     const st = standings(c, p), pos = st.list.findIndex(r => r.t == t) + 1, r = st.list[pos - 1];
     h += `<p style="margin:12px 0"><b>Position ${pos}</b> in Pool ${p}: played ${r.P}, won ${r.W}, ${r.Pts} points.</p>`;
-    for (const m of ms) h += `<div class="slot"><div class="time" style="font-size:16px">${dayLabel(m.day).replace(" ", "<br>")}<small>${m.time} PM</small></div><div>${matchCard(m)}</div></div>`;
+    const nights = [...new Set(ms.map(m => m.day))];
+    h += `<p class="note" style="margin:-6px 0 10px">${ms.length} matches over ${nights.length} night${nights.length === 1 ? "" : "s"}: ${nights.map(d => `${dayLabel(d)} (${ms.filter(m => m.day === d).length})`).join(", ")}</p>`;
+    for (const m of ms) {
+      h += `<div class="slot"><div class="time" style="font-size:16px">${dayLabel(m.day).replace(" ", "<br>")}<small>${m.time} PM</small></div><div>${matchCard(m)}${isAdmin() ? `<button class="btn" data-find="${m.id}" style="margin-top:6px;padding:6px 12px;font-size:13px">${view.findFor === m.id ? "Hide options" : "Find a new slot"}</button>` : ""}</div></div>`;
+      if (isAdmin() && view.findFor === m.id) h += renderFind(m);
+    }
+    if (isAdmin()) h += renderPlanner(c, p, t, ms);
   }
   return h;
 }
@@ -677,6 +683,97 @@ async function scSaveResult() {
   SC = null; scSave(); view.tab = "fixtures"; render();
 }
 
+// ---------------- move planner (My team, Admin) ----------------
+const hm = m => `${Math.floor(m / 60) - 12}:${String(m % 60).padStart(2, "0")}`;
+const keyOf = (m, t) => `${m.cat}|${m.pool}|${t}`;
+const tName = k => { const [c, p, t] = k.split("|"); return tname(c, p, +t); };
+function slotsFor(arr, d) {
+  const ms = arr.filter(x => x.day === d), times = [...new Set(ms.map(x => x.time))].sort((a, b) => mins(a) - mins(b)), out = [];
+  for (const t of times) for (const c of [1, 2]) out.push({ day: d, time: t, court: c, occ: ms.find(x => x.time === t && x.court === c) || null });
+  const last = times.length ? mins(times[times.length - 1]) : 18 * 60 + 30;
+  if (last + 30 <= 22 * 60 + 30) for (const c of [1, 2]) out.push({ day: d, time: hm(last + 30), court: c, occ: null, extend: true });
+  return out;
+}
+function nightOf(arr, k, d) { return arr.filter(x => x.day === d && teamKeys(x).includes(k)).sort((a, b) => mins(a.time) - mins(b.time)); }
+function evaluateMove(arr, m, slot, allowed) {
+  const occ = slot.occ, moved = [{ ...m, day: slot.day, time: slot.time, court: slot.court }];
+  if (occ) moved.push({ ...occ, day: m.day, time: m.time, court: m.court });
+  const sim = arr.map(x => moved.find(y => y.id === x.id) || x);
+  const errs = [], warns = []; let score = 0;
+  const keys = [...new Set([...teamKeys(m), ...(occ ? teamKeys(occ) : [])])];
+  for (const k of keys) for (const d of new Set([slot.day, m.day])) {
+    const now = nightOf(sim, k, d), before = nightOf(arr, k, d);
+    if (!now.length) continue;
+    for (let i = 1; i < now.length; i++) if (mins(now[i].time) - mins(now[i - 1].time) < 60) { errs.push(`${tName(k)} would have no break on ${dayLabel(d)} (${now[i - 1].time} and ${now[i].time})`); }
+    if (now.length >= 3) errs.push(`${tName(k)} would play ${now.length} matches on ${dayLabel(d)}`);
+    else if (now.length === 2 && before.length < 2) { warns.push(`${tName(k)} would play twice on ${dayLabel(d)} (${now.map(x => x.time).join(" and ")})`); score += 2; }
+  }
+  if (allowed) for (const x of moved) if (teamKeys(x).includes(allowed.key) && !allowed.days.has(x.day)) errs.push(`Puts ${tName(allowed.key)} on ${dayLabel(x.day)}, which they can’t play`);
+  if (occ) { warns.push(`Swaps with ${label(occ)}, who move to ${where(m.day, m.time, m.court)}. Check with them.`); score += 3; }
+  if (slot.extend) { warns.push(`Uses a new later slot (${slot.time} PM) on ${dayLabel(slot.day)}`); score += 1; }
+  for (const k of keys) { const all = sim.filter(x => !x.extra && teamKeys(x).includes(k)); const c1 = all.filter(x => x.court === 1).length, c2 = all.length - c1; if (Math.abs(c1 - c2) > all.length % 2) { warns.push(`${tName(k)}: courts become ${c1}/${c2}`); score += 0.5; } }
+  if (slot.day > 5) score += 0.2; // tiny preference for earlier nights, keeps plans stable
+  return { ok: !errs.length, errs, warns, score: score + errs.length * 100, slot, moved, sim };
+}
+function optionsFor(arr, m, allowed, limit = 8) {
+  const res = [];
+  for (const d of [...allowed.days].sort((a, b) => a - b)) for (const s of slotsFor(arr, d)) {
+    if (s.day === m.day && s.time === m.time && s.court === m.court) continue;
+    if (s.occ && (s.occ.id === m.id || teamKeys(s.occ).includes(allowed.key))) continue;
+    const r = evaluateMove(arr, m, s, allowed); if (r.ok) res.push(r);
+  }
+  return res.sort((a, b) => a.score - b.score || a.slot.day - b.slot.day || mins(a.slot.time) - mins(b.slot.time)).slice(0, limit);
+}
+function planFor(allowed) {
+  let arr = S.matches.map(x => ({ ...x }));
+  const need = arr.filter(x => teamKeys(x).includes(allowed.key) && !allowed.days.has(x.day)).sort((a, b) => a.day - b.day || mins(a.time) - mins(b.time));
+  const steps = [];
+  for (const n of need) {
+    const m = arr.find(x => x.id === n.id), opts = optionsFor(arr, m, allowed, 1);
+    if (!opts.length) { steps.push({ m, fail: true }); continue; }
+    steps.push({ m, r: opts[0] }); arr = opts[0].sim;
+  }
+  return { steps, sim: arr };
+}
+function optHTML(r, m, idx, applyAttr) {
+  const s = r.slot;
+  return `<div class="card" style="--c:var(--line);margin-bottom:8px"><div class="row"><span class="nm"><b>${esc(where(s.day, s.time, s.court))}</b>${s.occ ? ` <span class="note">(swap)</span>` : s.extend ? ` <span class="note">(new slot)</span>` : ` <span class="note">(free court)</span>`}</span>${applyAttr ? `<button class="btn pri" ${applyAttr}="${idx}" style="padding:6px 12px">Use this</button>` : ""}</div>
+  ${r.warns.length ? `<ul style="margin:6px 0 0 18px;font-size:13px">${r.warns.map(w => `<li>${esc(w)}</li>`).join("")}</ul>` : `<div class="note" style="color:var(--win)">No drawbacks: nobody else is affected.</div>`}</div>`;
+}
+function renderPlanner(c, p, t, ms) {
+  const key = `${c}|${p}|${t}`;
+  if (!view.plan || view.plan.key !== key) view.plan = { key, days: new Set(S.meta.days.map((_, i) => i + 1)) };
+  const allowed = view.plan, nd = S.meta.days.length;
+  let h = `<h3 class="cond" style="font-size:22px;margin:22px 0 4px">Plan a move</h3><p class="note" style="margin:0 0 8px">Tick the nights ${esc(tname(c, p, +t))} can play. The app finds new slots for any match on a night they can’t, and shows what each option affects.</p>`;
+  h += `<div class="chips" style="flex-wrap:wrap">${S.meta.days.map((_, i) => `<button class="chip" aria-pressed="${allowed.days.has(i + 1)}" data-pday="${i + 1}">Day ${i + 1}<small>${dayLabel(i + 1)}</small></button>`).join("")}</div>`;
+  h += `<div class="acts" style="justify-content:flex-start;flex-wrap:wrap;margin-top:6px"><span class="note" style="align-self:center">Quick:</span>${[1, 2, 3, 4, 5, 6].map(k => `<button class="btn" data-pby="${k}" style="padding:6px 10px;font-size:13px">Finish by ${dayLabel(k)}</button>`).join("")}<button class="btn" data-pby="${nd}" style="padding:6px 10px;font-size:13px">All nights</button></div>`;
+  const bad = ms.filter(m => !allowed.days.has(m.day));
+  if (!bad.length) { h += `<div class="alert ok">All ${ms.length} matches are already on nights they can play. To move one anyway, tap “Find a new slot” under it.</div>`; }
+  else {
+    h += `<div class="alert bad">${bad.length} match${bad.length > 1 ? "es are" : " is"} on nights they can’t play: ${bad.map(m => `${esc(label(m))} (${esc(dayLabel(m.day))})`).join("; ")}.</div>`;
+    const plan = planFor(allowed); view.planRes = plan;
+    h += `<h4 style="margin:12px 0 6px">Suggested plan</h4>`;
+    plan.steps.forEach((st, i) => {
+      h += `<div style="margin-bottom:4px"><b>${i + 1}. ${esc(label(st.m))}</b> <span class="note">now ${esc(where(st.m.day, st.m.time, st.m.court))}</span></div>`;
+      h += st.fail ? `<div class="alert bad" style="margin-bottom:8px">No clean option on the allowed nights. Try ticking another night, or add an extra slot.</div>` : optHTML(st.r, st.m, i, null);
+    });
+    if (plan.steps.every(s => !s.fail)) h += `<div class="acts" style="justify-content:flex-start"><button class="btn acc" id="applyPlan">Apply this whole plan</button></div>`;
+  }
+  return h;
+}
+function renderFind(m) {
+  const allowed = view.plan; if (!allowed) return "";
+  const opts = optionsFor(S.matches, m, allowed, 8); view.findOpts = opts;
+  if (!opts.length) return `<div class="alert bad" style="margin:6px 0 10px">No clean slot found on the ticked nights.</div>`;
+  return `<div style="margin:6px 0 12px 0;padding-left:10px;border-left:3px solid var(--accent)"><div class="note" style="margin-bottom:6px">Best options first:</div>${opts.map((r, i) => optHTML(r, m, i, "data-useopt")).join("")}</div>`;
+}
+function opsFromSim(sim, text) {
+  const ops = [];
+  for (const x of sim) { const o = S.matches.find(y => y.id === x.id); if (o && (o.day !== x.day || o.time !== x.time || o.court !== x.court)) ops.push({ type: "update", col: "matches", id: x.id, fields: { day: x.day, time: x.time, court: x.court } }); }
+  for (const x of sim) { const o = S.matches.find(y => y.id === x.id); if (o && (o.day !== x.day || o.time !== x.time || o.court !== x.court)) ops.push({ type: "log", text: `${label(o)} moved from ${where(o.day, o.time, o.court)} to ${where(x.day, x.time, x.court)}${text ? " (" + text + ")" : ""}` }); }
+  return ops;
+}
+
 // ---------------- arrange mode: drag or tap to swap, with a schedule assistant ----------------
 (function addArrangeCss() {
   const css = `
@@ -827,6 +924,16 @@ document.addEventListener("click", async e => {
   if (d.cat) { view.cat = d.cat; render(); return; }
   if (d.logf) { view.logf = d.logf; render(); return; }
   if (d.undo) { await revertLog(d.undo); return; }
+  if (d.pday) { const k = +d.pday; view.plan.days.has(k) ? view.plan.days.delete(k) : view.plan.days.add(k); view.findFor = null; render(); return; }
+  if (d.pby) { view.plan.days = new Set(Array.from({ length: +d.pby }, (_, i) => i + 1)); view.findFor = null; render(); return; }
+  if (d.find) { view.findFor = view.findFor === d.find ? null : d.find; render(); return; }
+  if (d.useopt != null) { const r = view.findOpts[+d.useopt], m = S.matches.find(x => x.id === view.findFor); if (!r || !m) return;
+    if (!confirm(`Move ${label(m)} to ${where(r.slot.day, r.slot.time, r.slot.court)}?${r.warns.length ? "\n\n• " + r.warns.join("\n• ") : ""}`)) return;
+    view.findFor = null; await save(opsFromSim(r.sim, "planned move"), "Moved for everyone"); return; }
+  if (t.id === "applyPlan") { const pl = view.planRes; if (!pl) return;
+    const lines = pl.steps.map(st => `• ${label(st.m)} → ${where(st.r.slot.day, st.r.slot.time, st.r.slot.court)}`).join("\n");
+    if (!confirm(`Apply this plan?\n\n${lines}\n\nOther teams affected are listed under each step.`)) return;
+    await save(opsFromSim(pl.sim, "planned move"), "Plan applied for everyone"); return; }
   if (t.id === "arrange") { view.arrange = !view.arrange; view.sel = null; render(); return; }
   if (d.add) { openAdd(+d.add); return; }
   if (d.edit) { openEdit(d.edit); return; }
@@ -846,7 +953,7 @@ document.addEventListener("click", async e => {
 });
 document.addEventListener("change", e => {
   if (e.target.id === "scDay") { view.scDay = e.target.value === "ko" ? "ko" : +e.target.value; render(); }
-  if (e.target.id === "teamSel") { view.team = e.target.value; try { localStorage.setItem("hbt-team", view.team); } catch (x) {} render(); }
+  if (e.target.id === "teamSel") { view.findFor = null; view.plan = null; view.team = e.target.value; try { localStorage.setItem("hbt-team", view.team); } catch (x) {} render(); }
 });
 function setHash() { const tok = view.tab === "fixtures" ? (view.day === "ko" ? "ko" : "d" + view.day) : view.tab; try { history.replaceState(null, "", "#" + tok); } catch (e) {} }
 function fromHash() { const h = (location.hash || "").slice(1); if (/^d[1-7]$/.test(h)) { view.tab = "fixtures"; view.day = +h.slice(1); } else if (h === "ko") { view.tab = "fixtures"; view.day = "ko"; } else if (["scorer", "standings", "knockouts", "teams", "rules", "changes", "people", "check"].includes(h)) view.tab = h; }

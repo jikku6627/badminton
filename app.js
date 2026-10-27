@@ -143,7 +143,7 @@ function standings(c, p) {
   for (let i = 0; i < list.length - 1; i++) {
     const x = list[i], y = list[i + 1];
     const tiedGroup = list.filter(r => r.Pts === x.Pts);
-    if (x.Pts === y.Pts && tiedGroup.length === 2) {
+    if (false) {
       const h = ms.find(m => done(m) && ((m.t1 === x.t && m.t2 === y.t) || (m.t1 === y.t && m.t2 === x.t)));
       if (h) { const yWon = (h.t1 === y.t && h.s1 > h.s2) || (h.t2 === y.t && h.s2 > h.s1); if (yWon) { list[i] = y; list[i + 1] = x; } }
     }

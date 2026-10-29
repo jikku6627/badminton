@@ -134,7 +134,7 @@ function standings(c, p) {
   const ms = S.matches.filter(m => m.cat === c && m.pool === p && !m.extra);
   for (const m of ms) {
     if (!done(m)) continue;
-    const a = rows[m.t1], b = rows[m.t2]; a.P++; b.P++; a.F += m.s1; a.A += m.s2; b.F += m.s2; b.A += m.s1;
+        const a = rows[m.t1], b = rows[m.t2]; a.P++; b.P++; if (!/\b(bye|walkover)\b/i.test(m.note || "")) { a.F += m.s1; a.A += m.s2; b.F += m.s2; b.A += m.s1; }
     if (m.s1 > m.s2) { a.W++; b.L++; } else { b.W++; a.L++; }
   }
   const list = Object.values(rows).map(r => ({ ...r, Pts: r.W * 2, D: r.F - r.A }));
